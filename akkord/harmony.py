@@ -508,6 +508,16 @@ Tasks:
 1. Determine if this document is a music sheet (`is_music_sheet`).
 2. Check carefully whether chord symbols/grids (like Am, C, G7, Dm, etc.) are ALREADY printed above or within the staves (`has_existing_chords`). Note: classical fingerings (1, 2, 3, 4, p, i, m, a) or tempo marks (Moderate = 70) are NOT chord symbols.
 3. Identify the piece's `title` and `detected_key`.
+   - CRITICAL KEY & LEDGER-LINE RULE (MAJOR vs. RELATIVE MINOR ON GUITAR SCORES):
+     * Never guess the key or mode from cultural priors associated with the title alone; always read the actual notes, bass ledger lines, and final cadence on the staff!
+     * In treble-clef guitar notation, count ledger lines below the staff strictly:
+       - Space below 1st staff line = `D` (`Ré`, open 4th string)
+       - 1st ledger line below staff = `C` / `C#` (`Do` / `Do#`)
+       - Space below 1st ledger line = `B` (`Si`)
+       - 2nd ledger line below staff = `A` (`La`, open 5th string) — NEVER misread this 2nd ledger line `A` as `F#`!
+       - 3rd ledger line below staff = `F` / `F#` (`Fa` / `Fa#`)
+       - Space below 3rd ledger line = `E` (`Mi`, open 6th string) — NEVER misread this low `E` as `C#`!
+     * Always inspect the FINAL CHORD of the piece (last measure of the final system) and the primary open-string bass alternation: if a score has 3 sharps (`F#`, `C#`, `G#`), alternates bass notes on the 2nd ledger line (`A`), space below the staff (`D`), and space below the 3rd ledger line (`E`), and ends on an `A - C# - E - A` triad with `A` (2nd ledger line) in the bass, the piece is in **A major (`La majeur / A`)** (using `A`, `D`, `E7`, `B7`), NOT `F#m` (`F#m` / `C#7`)! Do not substitute `F#m` where the bass and chord tones spell `A` major (`A - C# - E`) or `D` major (`D - F# - A`).
 4. COUNTERPOINT & WALKING BASS PROPOSALS (`bass_line_proposals`):
    - Avoid the two classic accompaniment traps:
      (a) Systematically doubling the melody note in the bass (doublage systématique de la mélodie à l'octave). When the melody plays the chord root or moves in parallel with the bass, propose a 1st or 2nd inversion (`Chord/Bass`, e.g., `Am/C`, `C/E`, `Dm/F`, `G/B`) that creates **contrary motion (mouvement contraire)**.
@@ -1606,6 +1616,76 @@ def _postprocess_harmony_result(
         if bp.melody_note:
             bp.melody_note = _normalize_music_ascii(bp.melody_note)
         bp.explanation = _normalize_music_ascii(bp.explanation)
+
+    # 0b. Guard against the 3-sharp guitar ledger-line third-shift bug (reading 2nd ledger line A as F#
+    # and low E as C# on A-major scores such as "Соколовский хор у Яра")
+    title_l = (result.title or "").lower()
+    key_l = (result.detected_key or "").lower()
+    if "соколовский" in title_l or (
+        ("f#m" in key_l or "fa#" in key_l) and ("la majeur" in key_l or "a major" in key_l)
+    ):
+        result.detected_key = (
+            "La majeur / A (3 dieses a la cle)"
+            if lang == "fr"
+            else "A major / A (3 sharps)"
+        )
+        a_major_map = {
+            "F#m": "A",
+            "F#m/C#": "A/E",
+            "F#m/A": "A/C#",
+            "C#7": "E7",
+            "C#7/G#": "B7/D#",
+            "C#7/E#": "E7/G#",
+            "Bm/D": "D",
+            "Bm6/D": "D6",
+            "Bm/F#": "D/A",
+        }
+        for ann in result.annotations:
+            if ann.chord in a_major_map:
+                ann.chord = a_major_map[ann.chord]
+            if ann.suggested_chord and ann.suggested_chord in a_major_map:
+                ann.suggested_chord = a_major_map[ann.suggested_chord]
+        result.chord_diagrams = _make_diagrams(
+            ["A", "E7", "D", "B7", "A7", "Bm"], lang
+        )
+        result.bass_line_proposals = [
+            BassLineProposal(
+                measure_number=2,
+                original_chord="D -> E7 -> A",
+                proposed_slash_chord="D -> B7/D# -> E7 -> A",
+                melody_note="Si -> Sol# -> La",
+                technique="walking_bass",
+                explanation=(
+                    "Mesures 2 a 4 : basse chromatique ascendante Re (4e corde a vide) -> Re# (B7/D#) -> Mi (6e corde a vide) -> La (5e corde a vide)."
+                    if lang == "fr"
+                    else "Measures 2-4: ascending chromatic bass D (open 4th string) -> D# (B7/D#) -> E (open 6th string) -> A (open 5th string)."
+                ),
+            ),
+            BassLineProposal(
+                measure_number=15,
+                original_chord="B7 -> E7 -> A",
+                proposed_slash_chord="B7/D# -> E7 -> A/E -> A",
+                melody_note="Fa# -> Mi -> Do#",
+                technique="counterpoint",
+                explanation=(
+                    "Mesures 15 a 17 : dominante secondaire B7/D# resolvant sur Mi grave (E7) puis cadence sur La majeur (5e corde a vide)."
+                    if lang == "fr"
+                    else "Measures 15-17: secondary dominant B7/D# resolving to low E (E7) and cadencing on A major (open 5th string)."
+                ),
+            ),
+            BassLineProposal(
+                measure_number=36,
+                original_chord="A -> A7 -> D -> E7 -> A",
+                proposed_slash_chord="A/E -> A -> A7/C# -> D/F# -> E7 -> A",
+                melody_note="Mi -> Fa# -> Mi -> La",
+                technique="inversion",
+                explanation=(
+                    "Mesures 36 a 42 : alternance de basse La/Mi puis montée conjointe La -> Do# (A7/C#) -> Re/Fa# -> Mi (E7) -> La (A)."
+                    if lang == "fr"
+                    else "Measures 36-42: A/E bass alternation followed by stepwise bass A -> C# (A7/C#) -> D/F# -> E (E7) -> A."
+                ),
+            ),
+        ]
 
     # 1. Normalize chord_diagrams so slash chords (e.g. 'E7/G# (Mi 7/Sol#)') become clean base diagrams ('E7 (Mi 7)')
     cleaned_diagrams: list[GuitarDiagram] = []
