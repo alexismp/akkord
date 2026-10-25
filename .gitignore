@@ -35,3 +35,8 @@ add-chords.py
 .LSOverride
 .idea/
 .vscode/
+
+# Maven / Java build artifacts
+target/
+*.jar
+*.jsa
