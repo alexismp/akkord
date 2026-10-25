@@ -96,8 +96,8 @@ def test_real_samples_layout_detection() -> None:
         "koh.pdf": 4,
         "lesou.pdf": 4,
         "vetcher.pdf": 5,
-        "ValseChopinAm.pdf": 5,
-        "June-Barcarolle.pdf": 5,
+        "Carcassi-Op60-No7.pdf": 9,
+        "Carcassi-Op60-No3.pdf": 8,
     }
     for fname, expected_sys_count in expected_p1_systems.items():
         fpath = samples_dir / fname

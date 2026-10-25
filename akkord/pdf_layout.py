@@ -225,19 +225,27 @@ def _clean_single_staff_cluster(cluster: list[float]) -> list[float]:
         return []
     lines = sorted(cluster, reverse=True)  # top to bottom in PDF points
 
-    # Iteratively strip top or bottom outlier lines whose spacing to their neighbor
-    # is much larger than the median spacing of the staff lines.
+    # Iteratively strip top or bottom outlier lines (e.g. volta brackets, text underlines, or
+    # horizontal sixteenth-note beams just above/below the staff) whose spacing to their neighbor
+    # deviates from the median spacing of the staff lines.
     while len(lines) > 5:
         diffs = [lines[j] - lines[j + 1] for j in range(len(lines) - 1)]
         sorted_diffs = sorted(diffs)
         med = sorted_diffs[len(sorted_diffs) // 2]
         if med <= 0:
             break
-        # If top gap or bottom gap is > 1.45x median spacing, strip that outer line
-        if diffs[0] > med * 1.45 and diffs[0] >= diffs[-1]:
+        dev_top = abs(diffs[0] - med)
+        dev_bot = abs(diffs[-1] - med)
+        if dev_top > med * 0.14 and dev_top >= dev_bot:
             lines.pop(0)
-        elif diffs[-1] > med * 1.45:
+        elif dev_bot > med * 0.14:
             lines.pop(-1)
+        elif len(lines) > 6:
+            # A standard staff or TAB never has > 6 lines; trim the outer line furthest from median
+            if dev_top >= dev_bot:
+                lines.pop(0)
+            else:
+                lines.pop(-1)
         else:
             break
 
