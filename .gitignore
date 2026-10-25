@@ -1,0 +1,37 @@
+# Python & Virtual Environments
+.venv/
+venv/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Runtime & Generated Outputs
+outputs/
+*.log
+/tmp/
+
+# Local Secrets & Credentials
+_oauth_client_config.json
+_admin_gmail_token.json
+_oauth_sessions.json
+_daily_activity.json
+*.pem
+*.key
+.env
+.env.*
+
+# Scratch & One-off scripts
+add-chords.py
+
+# macOS / IDE
+.DS_Store
+.AppleDouble
+.LSOverride
+.idea/
+.vscode/

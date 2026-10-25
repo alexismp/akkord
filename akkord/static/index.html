@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Akkord — Analyse harmonique, Contrepoint &amp; Walking Bass</title>
+  <link rel="icon" href="/static/icons/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" sizes="16x16" href="/static/icons/favicon-16.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/static/icons/logo-32.png">
+  <link rel="icon" type="image/png" sizes="64x64" href="/static/icons/logo-64.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="/static/icons/logo-192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/static/icons/apple-touch-icon-180.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,600;0,700;1,600&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="container header-inner">
+      <div class="brand-block">
+        <div class="brand-title-row">
+          <img
+            src="/static/icons/logo-128.png"
+            srcset="/static/icons/logo-64.png 1x, /static/icons/logo-128.png 2x"
+            width="56"
+            height="56"
+            alt="Logo Akkord"
+            class="logo-img"
+          >
+          <div>
+            <span class="eyebrow">Music Harmony &amp; Counterpoint Studio</span>
+            <h1>akkord</h1>
+          </div>
+        </div>
+        <p class="subtitle">
+          Importez une partition PDF ou connectez un dossier Google Drive. Akkord vérifie ou génère la grille d'accords, propose des <strong>lignes de basse en contrepoint &amp; walking bass</strong>, et produit un PDF annoté en Français ou en Anglais.
+        </p>
+      </div>
+
+      <div class="header-auth-box">
+        <span id="daily-quota-badge" class="pill-chip" title="Limite quotidienne de 25 partitions PDF par jour">
+          Quota : 0 / 25 PDF
+        </span>
+        <div id="auth-logged-out" class="auth-actions">
+          <a href="/auth/login" id="header-login-btn" class="btn btn-outline btn-sm">
+            🔐 Connexion Google Drive
+          </a>
+        </div>
+
+        <div id="auth-logged-in" class="auth-user-bar" hidden>
+          <span id="auth-user-email" class="pill-chip"></span>
+          <span id="auth-admin-badge" class="pill-chip pill-admin" hidden>Administrateur</span>
+          <button type="button" id="logout-btn" class="btn btn-outline btn-sm">
+            Déconnexion
+          </button>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="container main-grid">
+    <div class="left-column">
+      <!-- 1. Language (& Admin-only Model) Card -->
+      <section class="card settings-card" aria-labelledby="settings-heading">
+        <h2 id="settings-heading">1. Langue du PDF annoté</h2>
+
+        <fieldset class="form-fieldset">
+          <legend class="sr-only">Langue du PDF annoté</legend>
+          <div class="radio-group" role="radiogroup" aria-label="Langue du PDF annoté">
+            <label class="radio-card" for="lang-fr">
+              <input type="radio" id="lang-fr" name="language" value="fr" checked>
+              <span class="radio-title">Français (FR)</span>
+              <span class="radio-desc">Grille d'accords, Solfège (Am / La m) &amp; propositions de basses (contrepoint / walking bass)</span>
+            </label>
+
+            <label class="radio-card" for="lang-en">
+              <input type="radio" id="lang-en" name="language" value="en">
+              <span class="radio-title">English (EN)</span>
+              <span class="radio-desc">Standard chord symbols (Am, Dm/F, G/B) &amp; counterpoint / walking-bass review</span>
+            </label>
+          </div>
+        </fieldset>
+
+        <!-- Strictly hidden unless logged-in user is alexis.mp@gmail.com; collapsed by default inside an Advanced Menu -->
+        <div id="admin-model-panel" class="admin-panel" hidden>
+          <details class="advanced-details" id="admin-advanced-menu">
+            <summary class="advanced-summary">
+              <span aria-hidden="true">⚙️</span> Menu avancé (Modèle, Suivi des tokens &amp; coûts, Actions)
+            </summary>
+            <div class="details-body">
+              <div class="form-group">
+                <label for="model-input">Modèle d'analyse harmonique <span class="req-badge">(Admin)</span></label>
+                <span id="model-hint" class="hint">
+                  Réservé à l'administrateur (<code>alexis.mp@gmail.com</code>).
+                </span>
+                <input
+                  type="text"
+                  id="model-input"
+                  name="model"
+                  list="model-suggestions"
+                  value="gemini-4-argon"
+                  autocorrect="off"
+                  autocapitalize="off"
+                  spellcheck="false"
+                  aria-describedby="model-hint"
+                >
+                <datalist id="model-suggestions">
+                  <option value="gemini-4-argon"></option>
+                  <option value="gemini-3.8-flash"></option>
+                  <option value="gemini-3.5-flash-lite"></option>
+                  <option value="gemini-2.5-pro"></option>
+                  <option value="gemini-2.5-flash"></option>
+                </datalist>
+              </div>
+              <div class="admin-usage-dashboard" id="admin-usage-dashboard">
+                <h3 class="admin-sub-heading" id="admin-usage-heading">Suivi des tokens &amp; Coûts estimés (Admin)</h3>
+                <div class="usage-kpi-grid">
+                  <div class="usage-kpi-card">
+                    <span class="usage-kpi-label">Aujourd'hui (Tokens)</span>
+                    <strong id="usage-today-tokens" class="usage-kpi-value">0 tok</strong>
+                    <span id="usage-today-breakdown" class="usage-kpi-sub">In: 0 • Out: 0 • Think: 0</span>
+                  </div>
+                  <div class="usage-kpi-card">
+                    <span class="usage-kpi-label">Aujourd'hui (Coût estimé)</span>
+                    <strong id="usage-today-cost" class="usage-kpi-value">$0.0000 / 0.0000 €</strong>
+                    <span id="usage-today-files" class="usage-kpi-sub">0 partition(s) aujourd'hui</span>
+                  </div>
+                  <div class="usage-kpi-card">
+                    <span class="usage-kpi-label">Cumul global (Tokens &amp; Coût)</span>
+                    <strong id="usage-cum-cost" class="usage-kpi-value">$0.0000 / 0.0000 €</strong>
+                    <span id="usage-cum-tokens" class="usage-kpi-sub">0 tok au total</span>
+                  </div>
+                </div>
+                <details class="usage-details-box" id="usage-details-box">
+                  <summary>Historique détaillé des partitions du jour (tokens &amp; coûts)</summary>
+                  <div tabindex="0" role="region" aria-labelledby="admin-usage-table-caption" class="table-wrapper">
+                    <table class="usage-table" id="admin-usage-table">
+                      <caption id="admin-usage-table-caption" class="sr-only">Détail de la consommation de tokens et des coûts par partition analysée aujourd'hui</caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">Partition</th>
+                          <th scope="col">Heure &amp; Modèle</th>
+                          <th scope="col">Entrée / Sortie / Think</th>
+                          <th scope="col">Total Tokens</th>
+                          <th scope="col">Coût ($ / €)</th>
+                        </tr>
+                      </thead>
+                      <tbody id="admin-usage-tbody">
+                        <tr>
+                          <th scope="row">Aucune analyse aujourd'hui</th>
+                          <td>—</td>
+                          <td>0 / 0 / 0</td>
+                          <td>0</td>
+                          <td>$0.0000 / 0.0000 €</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </details>
+              </div>
+              <div class="admin-digest-row">
+                <span class="hint">Récapitulatif quotidien automatique envoyé à 18h00 (si des PDFs ont été analysés).</span>
+                <div class="admin-action-buttons">
+                  <button type="button" id="send-digest-btn" class="btn btn-outline btn-sm">
+                    <span aria-hidden="true">📧</span> Envoyer le récapitulatif du jour maintenant
+                  </button>
+                  <button type="button" id="resume-deferred-btn" class="btn btn-outline btn-sm">
+                    <span aria-hidden="true">▶️</span> Relancer les partitions reportées (Quota J+1)
+                  </button>
+                  <button type="button" id="reset-quota-btn" class="btn btn-outline btn-sm">
+                    <span aria-hidden="true">🔄</span> Remettre à zéro le quota du jour (0 / 25)
+                  </button>
+                </div>
+              </div>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- 2. Direct PDF Upload Card -->
+      <section class="card upload-card" aria-labelledby="upload-heading">
+        <h2 id="upload-heading">2. Importer une partition PDF</h2>
+        <form id="upload-form" action="/api/process-upload-stream" method="POST" enctype="multipart/form-data" novalidate>
+          <div class="form-group">
+            <label for="pdf-file-input">Sélectionnez ou glissez-déposez un fichier PDF <span class="req-badge">(Requis)</span></label>
+            <span id="upload-hint" class="hint">
+              Importez une ou plusieurs partitions PDF pour obtenir la version annotée avec accords, contrepoint et walking bass.
+            </span>
+            <div id="drop-zone" class="drop-zone">
+              <input
+                type="file"
+                id="pdf-file-input"
+                name="files"
+                accept=".pdf,application/pdf"
+                multiple
+                required
+                aria-describedby="upload-hint"
+                aria-errormessage="upload-error"
+                class="file-input"
+              >
+              <div class="drop-zone-content" aria-hidden="true">
+                <span class="drop-icon">📄</span>
+                <span id="selected-file-label" class="drop-title">Choisir un PDF ou glisser-déposer ici</span>
+                <span class="drop-sub">Partitions classiques, tablatures guitare et lead sheets (.pdf)</span>
+              </div>
+            </div>
+            <div id="upload-error" class="error-msg" role="alert">
+              <span aria-hidden="true">❌</span> Veuillez sélectionner au moins un fichier PDF.
+            </div>
+          </div>
+
+          <button type="submit" id="upload-submit-btn" class="btn btn-primary">
+            Annoter la partition PDF
+          </button>
+        </form>
+      </section>
+
+      <!-- 3. Google Drive Folder Scanner Card -->
+      <section class="card drive-card" aria-labelledby="drive-heading">
+        <div class="card-header-row">
+          <h2 id="drive-heading">3. Scanner un dossier Google Drive</h2>
+          <span id="drive-oauth-badge" class="mode-badge mode-skip">Public</span>
+        </div>
+
+        <div id="drive-oauth-callout" class="oauth-callout">
+          <p>
+            Pour analyser un <strong>dossier Google Drive privé</strong> (ou activer le mode administrateur), connectez votre compte Google.
+          </p>
+          <div class="oauth-callout-actions">
+            <a href="/auth/login" class="btn btn-outline btn-sm">🔐 Se connecter avec Google</a>
+          </div>
+        </div>
+
+        <form id="drive-form" action="/api/process-stream" method="POST" novalidate>
+          <div class="form-group">
+            <div class="label-row">
+              <label for="folder-input">URL ou ID du dossier Google Drive <span class="req-badge">(Requis)</span></label>
+              <button type="button" id="browse-drive-btn" class="btn btn-outline btn-sm">
+                <span aria-hidden="true">📁</span> Parcourir mon Google Drive…
+              </button>
+            </div>
+            <span id="folder-hint" class="hint">
+              Naviguez dans votre Google Drive ou collez l'URL d'un dossier (<code>https://drive.google.com/drive/folders/...</code>).
+            </span>
+            <input
+              type="text"
+              id="folder-input"
+              name="folder"
+              required
+              minlength="2"
+              autocorrect="off"
+              autocapitalize="off"
+              spellcheck="false"
+              aria-describedby="folder-hint"
+              aria-errormessage="folder-error"
+              placeholder="https://drive.google.com/drive/folders/..."
+            >
+            <div id="folder-error" class="error-msg" role="alert">
+              <span aria-hidden="true">❌</span> Veuillez saisir ou sélectionner un dossier Google Drive.
+            </div>
+          </div>
+
+          <div class="checkbox-row">
+            <input type="checkbox" id="upload-drive" name="upload_to_drive" checked>
+            <label for="upload-drive">Ré-envoyer les PDFs annotés dans le dossier Google Drive</label>
+          </div>
+
+          <div class="btn-row">
+            <button type="button" id="scan-btn" class="btn btn-outline">
+              Scanner le dossier
+            </button>
+            <button type="submit" id="drive-submit-btn" class="btn btn-primary">
+              Analyser les PDFs du dossier
+            </button>
+          </div>
+        </form>
+
+        <div id="discovered-container" class="discovered-box" hidden>
+          <h3>PDFs détectés dans le dossier</h3>
+          <ul id="discovered-list" class="file-list"></ul>
+        </div>
+      </section>
+    </div>
+
+    <!-- Results & Live Progress Column -->
+    <div class="right-column">
+      <section class="card results-card" aria-labelledby="results-heading">
+        <div class="results-header">
+          <h2 id="results-heading">Partitions annotées &amp; Analyse harmonique</h2>
+          <div id="status-banner" class="status-banner" role="status" aria-live="polite">
+            Prêt — importez un PDF ou scannez un dossier Google Drive.
+          </div>
+        </div>
+
+        <!-- Real-time Progress Panel -->
+        <div id="progress-panel" class="progress-panel" hidden aria-live="polite">
+          <div class="progress-top-row">
+            <span id="progress-file-label" class="progress-file-label">Traitement en cours…</span>
+            <div class="progress-top-actions">
+              <span id="progress-percent-label" class="progress-percent-label">0%</span>
+              <button type="button" id="cancel-analysis-btn" class="btn btn-danger btn-sm">
+                <span aria-hidden="true">⏹</span> Interrompre l'analyse
+              </button>
+            </div>
+          </div>
+          <div
+            class="progress-bar-track"
+            role="progressbar"
+            id="progress-bar-role"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            aria-valuenow="0"
+          >
+            <div id="progress-bar-fill" class="progress-bar-fill" style="width: 0%"></div>
+          </div>
+          <p id="progress-step-message" class="progress-step-message">Initialisation…</p>
+          <ol class="progress-steps-list" aria-label="Étapes du traitement">
+            <li id="step-download" class="progress-step-item">1. Lecture PDF</li>
+            <li id="step-layout" class="progress-step-item">2. Détection des portées</li>
+            <li id="step-harmony" class="progress-step-item">3. Analyse harmonique</li>
+            <li id="step-annotate" class="progress-step-item">4. Annotation PDF</li>
+          </ol>
+        </div>
+
+        <!-- Batch Job Summary & ZIP Download Bar -->
+        <div id="job-summary-bar" class="job-summary-bar" hidden aria-live="polite">
+          <div class="job-summary-counters">
+            <span class="job-counter-chip job-counter-done">
+              ✓ Terminées : <strong id="job-count-completed">0</strong>
+            </span>
+            <span class="job-counter-chip job-counter-queued">
+              ⏳ En file aujourd'hui : <strong id="job-count-queued">0</strong>
+            </span>
+            <span id="job-counter-deferred-wrap" class="job-counter-chip job-counter-deferred" hidden>
+              📅 Reportées (quota 25/j) : <strong id="job-count-deferred">0</strong>
+            </span>
+          </div>
+          <div class="job-summary-actions">
+            <button type="button" id="toggle-all-cards-btn" class="btn btn-outline btn-sm">
+              <span aria-hidden="true">↕</span> Tout replier
+            </button>
+            <a id="job-download-zip-btn" class="btn btn-outline btn-sm" href="#" hidden>
+              <span aria-hidden="true">📦</span> Tout télécharger (.zip)
+            </a>
+          </div>
+        </div>
+
+        <div id="empty-state" class="empty-state">
+          <div class="empty-illustration" aria-hidden="true">🎼</div>
+          <p>Vos partitions annotées s'afficheront ici au fur et à mesure de leur génération avec :</p>
+          <ul class="feature-bullets">
+            <li><strong>Mode Analyse :</strong> Revue des accords existants, précision (%) et corrections en place.</li>
+            <li><strong>Mode Ajout d'accords :</strong> Génération automatique des accords et diagrammes de manche 6 cordes.</li>
+            <li><strong>Contrepoint &amp; Walking Bass :</strong> Propositions de basses inversées évitant le doublage de la mélodie et l'usage systématique de la fondamentale.</li>
+          </ul>
+        </div>
+
+        <div id="results-list" class="results-list"></div>
+      </section>
+    </div>
+  </main>
+
+  <!-- Google Drive Interactive Folder Browser Modal -->
+  <dialog id="drive-browser-dialog" class="drive-browser-dialog" closedby="any" aria-labelledby="drive-browser-title">
+    <div class="drive-browser-inner">
+      <div class="drive-browser-header">
+        <div>
+          <h2 id="drive-browser-title">Sélectionner un dossier Google Drive</h2>
+          <p class="drive-browser-sub">Naviguez dans vos dossiers pour choisir où se trouvent vos partitions PDF.</p>
+        </div>
+        <form method="dialog">
+          <button type="submit" class="btn btn-outline btn-sm" aria-label="Fermer l'explorateur Google Drive">✕</button>
+        </form>
+      </div>
+
+      <div class="drive-browser-toolbar">
+        <div class="drive-root-tabs" role="group" aria-label="Source Google Drive">
+          <button type="button" id="drive-tab-root" class="btn btn-outline btn-sm active">
+            <span aria-hidden="true">🗂️</span> Mon Drive
+          </button>
+          <button type="button" id="drive-tab-shared" class="btn btn-outline btn-sm">
+            <span aria-hidden="true">👥</span> Partagés avec moi
+          </button>
+        </div>
+
+        <search class="drive-search-box">
+          <label for="drive-folder-search" class="sr-only">Rechercher un dossier</label>
+          <input
+            type="search"
+            id="drive-folder-search"
+            placeholder="Rechercher un dossier par nom…"
+            autocorrect="off"
+            spellcheck="false"
+          >
+          <button type="button" id="drive-search-btn" class="btn btn-outline btn-sm">
+            Rechercher
+          </button>
+        </search>
+      </div>
+
+      <nav aria-label="Fil d'Ariane Google Drive" class="drive-breadcrumb-nav">
+        <ol id="drive-breadcrumbs" class="drive-breadcrumbs"></ol>
+      </nav>
+
+      <div id="drive-browser-status" class="drive-browser-status" role="status" aria-live="polite" hidden></div>
+
+      <div class="drive-browser-body">
+        <ul id="drive-folder-list" class="drive-folder-list" aria-label="Sous-dossiers"></ul>
+        <div id="drive-pdf-preview" class="drive-pdf-preview" hidden>
+          <strong id="drive-pdf-count-label"></strong>
+          <ul id="drive-pdf-names" class="drive-pdf-names"></ul>
+        </div>
+      </div>
+
+      <div class="drive-browser-footer">
+        <div class="drive-selected-info">
+          <span class="drive-selected-label">Dossier courant :</span>
+          <strong id="drive-current-folder-name">Mon Drive</strong>
+        </div>
+        <div class="drive-browser-actions">
+          <form method="dialog">
+            <button type="submit" class="btn btn-outline btn-sm">Annuler</button>
+          </form>
+          <button type="button" id="drive-select-current-btn" class="btn btn-primary btn-sm">
+            ✓ Choisir ce dossier
+          </button>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- Single Shared On-Demand PDF Preview Modal (Memory-Safe) -->
+  <dialog id="pdf-preview-dialog" class="pdf-preview-dialog" closedby="any" aria-labelledby="pdf-preview-dialog-title">
+    <div class="pdf-preview-dialog-inner">
+      <div class="pdf-preview-dialog-header">
+        <div>
+          <h2 id="pdf-preview-dialog-title">Aperçu de la partition PDF</h2>
+          <p id="pdf-preview-dialog-sub" class="drive-browser-sub">Comparaison entre la partition originale et la partition annotée.</p>
+        </div>
+        <div class="pdf-preview-header-actions">
+          <a id="pdf-preview-download-btn" class="btn btn-primary btn-sm" href="#" download>
+            ⬇ Télécharger le PDF annoté
+          </a>
+          <form method="dialog">
+            <button type="submit" class="btn btn-outline btn-sm" aria-label="Fermer l'aperçu PDF">✕ Fermer</button>
+          </form>
+        </div>
+      </div>
+      <div id="pdf-preview-grid" class="pdf-compare-grid two-col">
+        <div id="pdf-preview-orig-pane" class="pdf-pane">
+          <span id="pdf-preview-orig-label" class="pdf-pane-label">Partition originale</span>
+          <iframe id="pdf-preview-orig-iframe" class="pdf-preview" src="about:blank" title="Aperçu PDF original"></iframe>
+        </div>
+        <div id="pdf-preview-annot-pane" class="pdf-pane">
+          <span id="pdf-preview-annot-label" class="pdf-pane-label">Partition annotée</span>
+          <iframe id="pdf-preview-annot-iframe" class="pdf-preview" src="about:blank" title="Aperçu PDF annoté"></iframe>
+        </div>
+      </div>
+    </div>
+  </dialog>
+
+  <script src="/static/app.js" defer></script>
+</body>
+</html>
