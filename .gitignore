@@ -35,3 +35,8 @@ add-chords.py
 .LSOverride
 .idea/
 .vscode/
+
+# Rust & Go build artifacts
+rust-engine/target/
+bin/
+akkord-bin
