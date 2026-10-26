@@ -6,4 +6,7 @@ __pycache__/
 outputs/
 samples/
 tests/
+docs/
+rust-engine/
+target/
 .git/
