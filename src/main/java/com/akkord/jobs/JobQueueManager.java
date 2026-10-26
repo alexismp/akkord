@@ -238,6 +238,7 @@ public final class JobQueueManager {
         jobDoc.put("language", lang);
         jobDoc.put("upload_to_drive", uploadToDrive);
         jobDoc.put("user_email", userEmail != null ? userEmail : "");
+        jobDoc.put("owner_id", normalizeRecordOwnerId(oauthSessionId, userEmail));
         jobDoc.put("oauth_session_id", oauthSessionId != null ? oauthSessionId : "");
         jobDoc.put("status", jobStatus);
         jobDoc.put("total_files", items.size());
@@ -385,15 +386,57 @@ public final class JobQueueManager {
         }
     }
 
+    public static String normalizeRecordOwnerId(String rawOwnerId, String userEmail) {
+        String owner = rawOwnerId != null ? rawOwnerId.trim() : "";
+        if (!owner.isEmpty()) {
+            return owner;
+        }
+        String email = userEmail != null ? userEmail.trim().toLowerCase() : "";
+        if (!email.isEmpty()) {
+            return "user:" + email;
+        }
+        return "user:" + AkkordConfig.ADMIN_EMAIL.toLowerCase();
+    }
+
+    public static boolean jobBelongsToOwner(Map<String, Object> jobDoc, String viewerOwnerId) {
+        if (jobDoc == null || viewerOwnerId == null || viewerOwnerId.isBlank()) {
+            return false;
+        }
+        String jobOwner = normalizeRecordOwnerId(
+                jobDoc.get("owner_id") instanceof String s ? s : "",
+                jobDoc.get("user_email") instanceof String u ? u : ""
+        );
+        return jobOwner.equals(viewerOwnerId.trim());
+    }
+
     public Map<String, Object> getJob(String jobId) {
         return firestore.getDoc("akkord_jobs", jobId);
     }
 
     public List<Map<String, Object>> listJobs(int limit) {
-        return firestore.listDocs("akkord_jobs", limit);
+        return listJobs(limit, "");
+    }
+
+    public List<Map<String, Object>> listJobs(int limit, String viewerOwnerId) {
+        if (viewerOwnerId == null || viewerOwnerId.isBlank()) {
+            return List.of();
+        }
+        List<Map<String, Object>> all = firestore.listDocs("akkord_jobs", 100);
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Map<String, Object> doc : all) {
+            if (jobBelongsToOwner(doc, viewerOwnerId)) {
+                out.add(doc);
+                if (out.size() >= limit) break;
+            }
+        }
+        return out;
     }
 
     public List<Map<String, Object>> getRecentHistory(int limit) {
+        return List.of();
+    }
+
+    public List<Map<String, Object>> getRecentHistory(int limit, String viewerOwnerId) {
         return List.of();
     }
 

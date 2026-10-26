@@ -85,6 +85,10 @@ public final class AkkordHttpServer {
     }
 
     public Map<String, Object> buildConfigPayload(UserSession user) {
+        return buildConfigPayload(user, user != null ? "user:" + user.email().toLowerCase() : "");
+    }
+
+    public Map<String, Object> buildConfigPayload(UserSession user, String ownerId) {
         Map<String, Object> userDict = user != null
                 ? user.toPublicDict(AkkordConfig.ADMIN_EMAIL)
                 : Map.of("authenticated", false);
@@ -101,7 +105,7 @@ public final class AkkordHttpServer {
         res.put("daily_report_hour", String.format("%02d:00", activity.getReportHourLocal()));
         res.put("daily_report_email", activity.getReportEmail());
         res.put("active_job", null);
-        res.put("recent_history", jobQueue.getRecentHistory(25));
+        res.put("recent_history", jobQueue.getRecentHistory(25, ownerId));
         res.put("runtime_engine", "java-25-virtual-threads");
         return res;
     }
@@ -111,7 +115,11 @@ public final class AkkordHttpServer {
         try {
             switch (path) {
                 case "/" -> serveStaticFile(ex, new File(staticDir, "index.html"));
-                case "/api/config" -> sendJson(ex, 200, buildConfigPayload(currentUser(ex)));
+                case "/api/config" -> {
+                    UserSession u = currentUser(ex);
+                    String ownerId = resolveOwnerId(ex, u);
+                    sendJson(ex, 200, buildConfigPayload(u, ownerId));
+                }
                 case "/api/auth/status" -> {
                     UserSession u = currentUser(ex);
                     if (u != null) {
@@ -131,11 +139,15 @@ public final class AkkordHttpServer {
                 case "/api/daily-report/send" -> sendJson(ex, 200, activity.sendDailyReportEmail("", false, ""));
                 case "/api/scan-folder" -> handleScanFolder(ex);
                 case "/api/jobs/drive" -> handleCreateDriveJob(ex);
-                case "/api/jobs" -> sendJson(ex, 200, Map.of(
-                        "jobs", jobQueue.listJobs(20),
-                        "recent_history", jobQueue.getRecentHistory(30),
-                        "quota", activity.getTodayQuotaStatus()
-                ));
+                case "/api/jobs" -> {
+                    UserSession u = currentUser(ex);
+                    String ownerId = resolveOwnerId(ex, u);
+                    sendJson(ex, 200, Map.of(
+                            "jobs", jobQueue.listJobs(20, ownerId),
+                            "recent_history", jobQueue.getRecentHistory(30, ownerId),
+                            "quota", activity.getTodayQuotaStatus()
+                    ));
+                }
                 default -> {
                     if (path.startsWith("/static/")) {
                         String rel = path.substring("/static/".length());
@@ -201,19 +213,28 @@ public final class AkkordHttpServer {
             m.put("local_path", s.localPath());
             items.add(m);
         }
-        Map<String, Object> jobDoc = jobQueue.createBatchJob("drive", items, model, lang, upload, "", "", folder);
+        UserSession u = currentUser(ex);
+        String ownerId = resolveOwnerId(ex, u);
+        String userEmail = u != null ? u.email() : "";
+        Map<String, Object> jobDoc = jobQueue.createBatchJob("drive", items, model, lang, upload, userEmail, ownerId, folder);
         sendJson(ex, 200, Map.of("job", jobDoc, "quota", activity.getTodayQuotaStatus()));
     }
 
     private void handleJobSubroute(HttpExchange ex, String path) throws IOException {
+        UserSession u = currentUser(ex);
+        String ownerId = resolveOwnerId(ex, u);
         String[] parts = path.substring("/api/jobs/".length()).split("/");
         String jobId = parts[0];
+        Map<String, Object> job = jobQueue.getJob(jobId);
+        if (job == null) {
+            sendJson(ex, 404, Map.of("detail", "Job not found"));
+            return;
+        }
+        if (!JobQueueManager.jobBelongsToOwner(job, ownerId)) {
+            sendJson(ex, 403, Map.of("detail", "Accès refusé : ce traitement appartient à un autre utilisateur."));
+            return;
+        }
         if (parts.length == 1) {
-            Map<String, Object> job = jobQueue.getJob(jobId);
-            if (job == null) {
-                sendJson(ex, 404, Map.of("detail", "Job not found"));
-                return;
-            }
             sendJson(ex, 200, Map.of("job", job, "quota", activity.getTodayQuotaStatus()));
         } else if ("cancel".equals(parts[1])) {
             sendJson(ex, 200, Map.of("job", jobQueue.cancelJob(jobId)));
@@ -226,6 +247,26 @@ public final class AkkordHttpServer {
                 os.write(zipBytes);
             }
         }
+    }
+
+    private String resolveOwnerId(HttpExchange ex, UserSession user) {
+        if (user != null && user.email() != null && !user.email().isBlank()) {
+            return "user:" + user.email().trim().toLowerCase();
+        }
+        List<String> cookies = ex.getRequestHeaders().get("Cookie");
+        if (cookies != null) {
+            for (String header : cookies) {
+                for (String part : header.split(";")) {
+                    String[] kv = part.trim().split("=", 2);
+                    if (kv.length == 2 && "akkord_anon".equals(kv[0]) && !kv[1].isBlank()) {
+                        return "anon:" + kv[1].trim();
+                    }
+                }
+            }
+        }
+        String anonId = "anon_" + java.util.UUID.randomUUID().toString().replace("-", "");
+        ex.getResponseHeaders().add("Set-Cookie", "akkord_anon=" + anonId + "; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000");
+        return "anon:" + anonId;
     }
 
     private UserSession currentUser(HttpExchange ex) {

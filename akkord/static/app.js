@@ -1066,6 +1066,8 @@
             resumeJobMonitoring(runningJob.job_id);
           } else if (jobs.length > 0 || historyItems.length > 0) {
             renderRestoredHistory(jobs, historyItems);
+          } else {
+            clearWorkspaceResults();
           }
         })
         .catch(() => {});
@@ -1189,7 +1191,9 @@
   if (logoutBtn) {
     logoutBtn.addEventListener("click", async () => {
       await fetch("/api/auth/logout", { method: "POST" });
+      clearWorkspaceResults();
       updateAuthUI({ authenticated: false, email: "", is_admin: false });
+      updateAdminUsageUI(null);
       setStatus(t("status_logged_out"));
     });
   }
@@ -1591,13 +1595,36 @@
     }
   }
 
+  function clearWorkspaceResults() {
+    stopJobPolling();
+    localStorage.removeItem("akkord_active_job_id");
+    activeJobId = null;
+    renderedItemState.clear();
+    if (resultsList) {
+      resultsList.innerHTML = "";
+    }
+    if (emptyState) {
+      emptyState.hidden = false;
+    }
+    if (jobSummaryBar) {
+      jobSummaryBar.hidden = true;
+    }
+    if (jobDownloadZipBtn) {
+      jobDownloadZipBtn.hidden = true;
+      jobDownloadZipBtn.removeAttribute("href");
+    }
+    hideProgressPanel();
+    if (pdfPreviewDialog && pdfPreviewDialog.open) {
+      pdfPreviewDialog.close();
+    }
+  }
+
   async function pollJobOnce(jobId) {
     try {
       const resp = await fetch(`/api/jobs/${encodeURIComponent(jobId)}`);
       if (!resp.ok) {
-        if (resp.status === 404) {
-          localStorage.removeItem("akkord_active_job_id");
-          stopJobPolling();
+        if (resp.status === 404 || resp.status === 403) {
+          clearWorkspaceResults();
         }
         return;
       }
