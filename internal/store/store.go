@@ -733,14 +733,35 @@ func (a *ActivityManager) GetTodayQuotaStatus() map[string]any {
 		remaining = 0
 	}
 	return map[string]any{
-		"date":                 tKey,
-		"used":                 used,
+		"date":                  tKey,
+		"used":                  used,
 		"total_processed_today": totalFiles,
-		"quota_reset_baseline": baseline,
-		"limit":                a.DailyLimit,
-		"remaining":            remaining,
-		"exceeded":             used >= a.DailyLimit,
+		"quota_reset_baseline":  baseline,
+		"limit":                 a.DailyLimit,
+		"remaining":             remaining,
+		"global_limit":          200,
+		"global_used":           totalFiles,
+		"global_remaining":      max(0, 200-totalFiles),
+		"exceeded":              used >= a.DailyLimit || totalFiles >= 200,
 	}
+}
+
+// GetTodayQuotaStatusForOwner returns the per-owner quota status (5/day for anon:, 25/day for user:, 200/day global ceiling).
+func (a *ActivityManager) GetTodayQuotaStatusForOwner(ownerID string) map[string]any {
+	base := a.GetTodayQuotaStatus()
+	cleaned := strings.TrimSpace(ownerID)
+	if strings.HasPrefix(cleaned, "anon:") {
+		anonLim := 5
+		used := toInt(base["used"])
+		rem := max(0, min(anonLim-used, toInt(base["global_remaining"])))
+		base["owner_id"] = cleaned
+		base["limit"] = anonLim
+		base["remaining"] = rem
+		base["exceeded"] = rem <= 0
+	} else if cleaned != "" {
+		base["owner_id"] = cleaned
+	}
+	return base
 }
 
 // ResetDailyQuota resets the effective daily counter to 0 while preserving cumulative token/cost stats.

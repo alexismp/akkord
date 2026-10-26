@@ -464,7 +464,7 @@ func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"jobs":           s.JobQueue.ListJobs(20, ownerID),
 		"recent_history": s.JobQueue.GetRecentHistory(30, ownerID),
-		"quota":          s.Activity.GetTodayQuotaStatus(),
+		"quota":          s.Activity.GetTodayQuotaStatusForOwner(ownerID),
 	})
 }
 
