@@ -473,10 +473,19 @@ def build_harmony_prompt(
     locale = get_locale(language)
     layout_descriptions: list[str] = []
     for page in layouts:
-        sys_desc = ", ".join(
-            f"S{s.index} (chord_y_pt={s.chord_y_pt}, staff_top={s.y_top_pt})"
-            for s in page.systems
-        )
+        sys_parts: list[str] = []
+        for s in page.systems:
+            bars_info = ""
+            if len(s.barlines_x_pt) >= 2:
+                beat1_xs = [
+                    str(int(round(bx + (28.0 if b_i == 0 else 8.0))))
+                    for b_i, bx in enumerate(s.barlines_x_pt[:-1])
+                ]
+                bars_info = f", measure_beat1_x=[{', '.join(beat1_xs)}]"
+            sys_parts.append(
+                f"S{s.index} (chord_y_pt={s.chord_y_pt}, staff_top={s.y_top_pt}{bars_info})"
+            )
+        sys_desc = ", ".join(sys_parts)
         layout_descriptions.append(
             f"- Page {page.page_num}: size={page.width_pt:.0f}x{page.height_pt:.0f} pt; "
             f"detected systems: [{sys_desc}]; bottom free space={page.bottom_free_pt:.0f} pt"
@@ -498,7 +507,8 @@ Language Requirement:
 {locale["prompt_directive"]}
 
 CRITICAL COORDINATE & DIAGRAM RULES:
-- `x_pt` MUST be in actual PDF points matching the red vertical guide lines on the image (typically between `75` and `755` for an 827pt wide page). Do NOT use 0..1000 normalized coordinates!
+- `x_pt` MUST be in actual PDF points matching the vertical guide lines on the image (typically between `75` and `755` for an 827pt wide page). Do NOT use 0..1000 normalized coordinates!
+- BEAT-1 HORIZONTAL ALIGNMENT RULE: Every chord symbol or review badge that applies to a measure MUST have its `x_pt` aligned with **Beat 1 of that specific measure** (immediately to the right of that measure's left barline, typically `barline_x + 8 pt`, matching `measure_beat1_x` and the orange Beat-1 ticks on the guide image, or aligned with the first notehead/printed chord of that measure). NEVER place a measure's chord in the geometric center or second half of the measure unless a second harmonic change genuinely occurs on Beat 2 or Beat 3, and NEVER shift a chord belonging to Measure 2 or Measure 3 onto Measure 1!
 - In `annotations`, `chord` and `suggested_chord` MUST be ONLY a SINGLE compact chord symbol (max 12 characters, e.g. `Bm(maj7)/A#`, `Bm7/A`, `Dm/F`, `Gm6/E`, `A7/C#`). NEVER concatenate multiple chords or alternatives with `/` (e.g. NEVER write `A7/Cdim7/C#7`), NEVER output ASCII bar tables (`|Am |Dm |...`), and NEVER put solfège translations, fret fingerings `[x-1-4-4-3-2]`, or explanations inside `chord` or `suggested_chord`! Keep `note` concise (1 short sentence, max 140 characters). Put detailed explanations in `review_improvements` and `bass_line_proposals`.
 - Use standard ASCII `#` and `b` for sharps and flats (do NOT use `♯` or `♭` Unicode symbols).
 - `chord_diagrams` MUST contain up to 8 BASE guitar chords only (e.g., `Am`, `Dm`, `E`, `E7`, `C`, `G`, `F`, `A7`). NEVER put slash chords (like `E7/G#` or `Dm/F`) inside `chord_diagrams`; explain slash chords in `slash_chord_notes` and `bass_line_proposals`.
@@ -1846,12 +1856,13 @@ def _postprocess_harmony_result(
     for ann in result.annotations:
         by_page_sys.setdefault((ann.page_num, ann.system_index), []).append(ann)
 
-    for (p_num, _), sys_anns in by_page_sys.items():
-        page_w = (
-            layouts[min(len(layouts) - 1, max(0, p_num - 1))].width_pt
+    for (p_num, s_idx), sys_anns in by_page_sys.items():
+        p_layout = (
+            layouts[min(len(layouts) - 1, max(0, p_num - 1))]
             if layouts
-            else 827.0
+            else None
         )
+        page_w = p_layout.width_pt if p_layout else 827.0
         max_x = max((float(a.x_pt) for a in sys_anns), default=0.0)
         min_x = min((float(a.x_pt) for a in sys_anns), default=80.0)
         if max_x > (page_w - 32.0) and max_x > min_x:
@@ -1864,6 +1875,32 @@ def _postprocess_harmony_result(
                     * (usable_right - usable_left),
                     1,
                 )
+
+        # Snap single-chord-per-measure annotations that floated into the middle of their measure
+        # back to Beat 1 of THAT SAME measure (never crossing into an adjacent measure).
+        if p_layout:
+            sys_obj = next((s for s in p_layout.systems if s.index == s_idx), None)
+            if sys_obj and len(sys_obj.barlines_x_pt) >= 3:
+                bars = sys_obj.barlines_x_pt
+                for m_idx in range(len(bars) - 1):
+                    b_left = bars[m_idx]
+                    b_right = bars[m_idx + 1]
+                    m_width = b_right - b_left
+                    if m_width < 48.0:
+                        continue
+                    in_measure = [
+                        a
+                        for a in sys_anns
+                        if (b_left - 3.0) <= float(a.x_pt) < (b_right - 4.0)
+                    ]
+                    if len(in_measure) == 1:
+                        ann = in_measure[0]
+                        beat1_x = b_left + (28.0 if m_idx == 0 else 8.0)
+                        if (
+                            float(ann.x_pt) > beat1_x + 12.0
+                            and float(ann.x_pt) <= b_left + m_width * 0.85
+                        ):
+                            ann.x_pt = round(beat1_x, 1)
 
     # 3. Ensure every detected staff system on every page has chord coverage (both add_chords and analyze modes)
     if layouts and result.annotations:

@@ -297,12 +297,18 @@ def _draw_minimal_footnote_markers(
                     usable_right - usable_left
                 )
 
+            y = _resolve_system_y(page_layout, ann, has_existing_chords=True)
+
             # Place improvement badge immediately to the right of the printed chord symbol
-            if ann.status == "improve":
-                raw_x += 18.0
+            # only when the printed chord is actually located at this top-of-staff Y band.
+            if (
+                ann.status == "improve"
+                and page_layout.ink_density_in_rect(raw_x, y - pad_y, 14.0, pill_h, pad_pt=0.5)
+                > 0.08
+            ):
+                raw_x += 16.0
 
             x = max(36.0, min(page_layout.width_pt - pill_w - 20.0, raw_x))
-            y = _resolve_system_y(page_layout, ann, has_existing_chords=True)
 
             if x < last_right_edge + 3.0:
                 x = min(page_layout.width_pt - pill_w - 18.0, last_right_edge + 3.0)
@@ -313,8 +319,8 @@ def _draw_minimal_footnote_markers(
                 y_pt=y - pad_y,
                 w_pt=pill_w,
                 h_pt=pill_h,
-                x_min_pt=max(32.0, last_right_edge + 2.5, x - pad_x - 20.0),
-                x_max_pt=min(page_layout.width_pt - 14.0, x - pad_x + pill_w + 28.0),
+                x_min_pt=max(32.0, last_right_edge + 2.5, x - pad_x - 10.0),
+                x_max_pt=min(page_layout.width_pt - 14.0, x - pad_x + pill_w + 12.0),
                 y_min_pt=y_min,
                 y_max_pt=y_max,
                 placed_rects=placed_rects,
@@ -487,11 +493,16 @@ def _draw_chord_pills(
                     usable_right - usable_left
                 )
 
-            if ann.status == "improve":
-                raw_x += 18.0
+            y = _resolve_system_y(page_layout, ann, has_existing_chords)
+
+            if (
+                ann.status == "improve"
+                and page_layout.ink_density_in_rect(raw_x, y - pad_y, 14.0, pill_h, pad_pt=0.5)
+                > 0.08
+            ):
+                raw_x += 16.0
 
             x = max(36.0, min(page_layout.width_pt - pill_w - 20.0, raw_x))
-            y = _resolve_system_y(page_layout, ann, has_existing_chords)
 
             # Enforce left-to-right monotonic ordering on the system
             if x - pad_x < last_right_edge + 3.0:
@@ -500,14 +511,14 @@ def _draw_chord_pills(
                     last_right_edge + 3.0 + pad_x,
                 )
 
-            # Find a clear spot near (x, y) that avoids existing ink (notes, tuplets, measure numbers, text)
+            # Find a clear spot near (x, y) that avoids existing ink while staying anchored on Beat 1
             rect_x, rect_y = page_layout.find_clear_rect(
                 x_pt=x - pad_x,
                 y_pt=y - pad_y,
                 w_pt=pill_w,
                 h_pt=pill_h,
-                x_min_pt=max(32.0, last_right_edge + 2.5, x - pad_x - 28.0),
-                x_max_pt=min(page_layout.width_pt - 14.0, x - pad_x + pill_w + 38.0),
+                x_min_pt=max(32.0, last_right_edge + 2.5, x - pad_x - 10.0),
+                x_max_pt=min(page_layout.width_pt - 14.0, x - pad_x + pill_w + 12.0),
                 y_min_pt=y_min,
                 y_max_pt=y_max,
                 placed_rects=placed_rects,

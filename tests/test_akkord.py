@@ -1656,6 +1656,65 @@ def test_greensleeves_guitar_easy_chord_analysis() -> None:
     ]
 
 
+def test_beat1_snapping_within_each_measure_without_crossing_measures() -> None:
+    """Verify chords floating in the middle of Measure 2 or 3 snap to Beat 1 of their own measure, never to Measure 1."""
+    from akkord.harmony import _postprocess_harmony_result
+    from akkord.pdf_layout import PageLayout, StaffSystem
+
+    # Barlines for a 4-measure system: M1=[53..150], M2=[150..270], M3=[270..390], M4=[390..520]
+    layout = PageLayout(
+        page_num=1,
+        width_pt=595.0,
+        height_pt=842.0,
+        systems=[
+            StaffSystem(
+                index=1,
+                y_top_pt=700.0,
+                y_bottom_pt=640.0,
+                chord_y_pt=714.0,
+                barlines_x_pt=[53.0, 150.0, 270.0, 390.0, 520.0],
+            )
+        ],
+    )
+    raw = HarmonyAnalysisResult(
+        is_music_sheet=True,
+        has_existing_chords=True,
+        title="La Partida",
+        detected_key="Am",
+        overall_summary="Beat-1 alignment test.",
+        accuracy_score=80,
+        annotations=[
+            # No chord in Measure 1 (anacrusis)
+            # Chord in Measure 2 placed in the middle of Measure 2 (x=210.0)
+            ChordAnnotation(page_num=1, system_index=1, x_pt=210.0, chord="Am", status="correct", measure_number=2),
+            # Chord in Measure 3 placed in the middle of Measure 3 (x=335.0)
+            ChordAnnotation(
+                page_num=1,
+                system_index=1,
+                x_pt=335.0,
+                chord="Am/C",
+                status="missing",
+                suggested_chord="Am/C",
+                measure_number=3,
+            ),
+            # Two chords in Measure 4 (Beat 1 at 398.0 and Beat 3 at 475.0) -> must NOT collapse onto Beat 1
+            ChordAnnotation(page_num=1, system_index=1, x_pt=398.0, chord="E", status="improve", suggested_chord="E7", measure_number=4),
+            ChordAnnotation(page_num=1, system_index=1, x_pt=475.0, chord="E7/G#", status="missing", suggested_chord="E7/G#", measure_number=4),
+        ],
+    )
+
+    processed = _postprocess_harmony_result(raw, [layout], lang="fr")
+    xs = [a.x_pt for a in processed.annotations]
+    # Measure 2 chord snapped to Beat 1 of Measure 2 (150 + 8 = 158.0), NOT shifted to Measure 1
+    assert xs[0] == 158.0
+    # Measure 3 chord snapped to Beat 1 of Measure 3 (270 + 8 = 278.0), NOT shifted to Measure 1 or 2
+    assert xs[1] == 278.0
+    # Measure 4's two chords remain distinct at 398.0 and 475.0
+    assert xs[2] == 398.0
+    assert xs[3] == 475.0
+
+
+
 
 
 

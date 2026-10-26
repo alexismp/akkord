@@ -33,6 +33,7 @@ class StaffSystem:
     y_bottom_pt: float  # Bottom of the system (PDF points from bottom)
     chord_y_pt: float  # Recommended Y coordinate in PDF points to place chord pills
     treble_height_pt: float = 20.0  # Height of the upper staff in PDF points (reflects note/staff scale)
+    barlines_x_pt: list[float] = field(default_factory=list)  # Detected vertical barline X coordinates in PDF points
 
 
 @dataclass
@@ -141,7 +142,8 @@ class PageLayout:
                     return True
             return False
 
-        # Candidate offsets: explore vertical and horizontal nudges to dodge stems, beams, tuplets, and text
+        # Candidate offsets: prioritize staying horizontally locked on Beat 1 (small dx)
+        # while nudging vertically (dy) above high notes/slurs before drifting horizontally.
         dy_steps = [
             0.0,
             2.0,
@@ -160,40 +162,36 @@ class PageLayout:
         ]
         dx_steps = [
             0.0,
-            4.0,
-            -4.0,
+            2.5,
+            -2.5,
+            5.0,
+            -5.0,
             8.0,
             -8.0,
-            13.0,
-            -12.0,
-            18.0,
-            -17.0,
-            24.0,
-            -22.0,
-            30.0,
-            -28.0,
-            38.0,
-            -34.0,
+            11.0,
+            -11.0,
+            14.0,
+            -14.0,
         ]
 
         best_pos = (base_x, base_y)
         best_score = float("inf")
 
-        for dy in dy_steps:
-            cy = base_y + dy
-            if cy < y_min_pt - 0.1 or cy > eff_y_max + 0.1:
+        for dx in dx_steps:
+            cx = base_x + dx
+            if cx < x_min_pt - 0.1 or cx > eff_x_max + 0.1:
                 continue
-            cy = max(y_min_pt, min(eff_y_max, cy))
-            for dx in dx_steps:
-                cx = base_x + dx
-                if cx < x_min_pt - 0.1 or cx > eff_x_max + 0.1:
+            cx = max(x_min_pt, min(eff_x_max, cx))
+            for dy in dy_steps:
+                cy = base_y + dy
+                if cy < y_min_pt - 0.1 or cy > eff_y_max + 0.1:
                     continue
-                cx = max(x_min_pt, min(eff_x_max, cx))
+                cy = max(y_min_pt, min(eff_y_max, cy))
                 if _overlaps_placed(cx, cy):
                     continue
                 ink = self.ink_density_in_rect(cx, cy, w_pt, h_pt, pad_pt=pad_pt)
-                # Score combines ink density (heavily weighted) + small distance penalty from target
-                dist_penalty = (abs(dx) * 0.0012) + (abs(dy) * 0.0018)
+                # Penalize horizontal drift 3.75x more than vertical nudge so chords stay anchored on Beat 1
+                dist_penalty = (abs(dx) * 0.0045) + (abs(dy) * 0.0012)
                 score = ink + dist_penalty
                 if score < best_score:
                     best_score = score
@@ -355,6 +353,60 @@ def _extract_staff_line_clusters(
     return valid_staves
 
 
+def _detect_system_barlines(
+    gray_img: Image.Image,
+    width_pt: float,
+    height_pt: float,
+    y_top_pt: float,
+    y_bottom_pt: float,
+    treble_h_pt: float,
+) -> list[float]:
+    """Detect vertical barline X coordinates (in PDF points) for a single staff system."""
+    img_w, img_h = gray_img.size
+    if img_w <= 0 or img_h <= 0:
+        return []
+    px = gray_img.load()
+    py_top = max(0, min(img_h - 1, int(round((1.0 - y_top_pt / height_pt) * img_h))))
+    py_bot = max(0, min(img_h - 1, int(round((1.0 - y_bottom_pt / height_pt) * img_h))))
+    py_treb_bot = max(
+        0,
+        min(img_h - 1, int(round((1.0 - (y_top_pt - treble_h_pt) / height_pt) * img_h))),
+    )
+    is_multi = (y_top_pt - y_bottom_pt) > treble_h_pt * 1.6
+    y_end = py_bot if is_multi else py_treb_bot
+    span = max(1, y_end - py_top - 1)
+    if span < 8:
+        return []
+
+    bars_x_pt: list[float] = []
+    x_start = int(img_w * 0.05)
+    x_limit = int(img_w * 0.96)
+
+    for x in range(x_start, x_limit):
+        dark_cnt = sum(1 for y in range(py_top + 1, y_end) if px[x, y] < 195)
+        ratio = dark_cnt / span
+        if is_multi:
+            is_bar = ratio >= 0.88
+        else:
+            above_clear = all(
+                px[x, max(0, py_top - dy)] >= 200 for dy in (4, 5, 6)
+            )
+            below_clear = all(
+                px[x, min(img_h - 1, py_treb_bot + dy)] >= 200 for dy in (4, 5, 6)
+            )
+            is_bar = ratio >= 0.92 and above_clear and below_clear
+
+        if is_bar:
+            x_pt = round((x / img_w) * width_pt, 1)
+            if not bars_x_pt or (x_pt - bars_x_pt[-1]) >= 45.0:
+                bars_x_pt.append(x_pt)
+            elif (x_pt - bars_x_pt[-1]) <= 3.5:
+                # Merge adjacent pixels of the same thick/double barline
+                bars_x_pt[-1] = round((bars_x_pt[-1] + x_pt) / 2.0, 1)
+
+    return bars_x_pt
+
+
 def _detect_staff_systems_from_image(
     gray_img: Image.Image, width_pt: float, height_pt: float
 ) -> tuple[list[StaffSystem], float]:
@@ -431,6 +483,9 @@ def _detect_staff_systems_from_image(
         else:
             offset = min(18.5, max(10.5, treble_h_pt * 0.85))
         chord_y_pt = min(height_pt - 30.0, y_top_pt + offset)
+        barlines = _detect_system_barlines(
+            gray_img, width_pt, height_pt, y_top_pt, y_bottom_pt, treble_h_pt
+        )
         systems.append(
             StaffSystem(
                 index=idx,
@@ -438,6 +493,7 @@ def _detect_staff_systems_from_image(
                 y_bottom_pt=round(y_bottom_pt, 1),
                 chord_y_pt=round(chord_y_pt, 1),
                 treble_height_pt=round(treble_h_pt, 1),
+                barlines_x_pt=barlines,
             )
         )
 
@@ -465,10 +521,15 @@ def _create_guide_image(
         draw.line([(px, 0), (px, img_h)], fill=(220, 230, 242), width=1)
         draw.text((px + 2, 6), f"x={x_pt}", fill=(41, 128, 185), font=font)
 
-    # Draw detected system markers (S1, S2...) at their chord_y_pt height
+    # Draw detected system markers (S1, S2...) at their chord_y_pt height and Beat-1 barline ticks
     for sys in systems:
         py = int((1.0 - (sys.chord_y_pt / height_pt)) * img_h)
         draw.line([(0, py), (img_w, py)], fill=(41, 128, 185), width=2)
+        for b_idx, bx_pt in enumerate(sys.barlines_x_pt[:-1]):
+            beat1_x_pt = bx_pt + (28.0 if b_idx == 0 else 8.0)
+            bpx = int((beat1_x_pt / width_pt) * img_w)
+            draw.line([(bpx, max(0, py - 10)), (bpx, min(img_h - 1, py + 10))], fill=(211, 84, 0), width=2)
+            draw.text((bpx + 2, max(0, py - 12)), f"{int(round(beat1_x_pt))}", fill=(180, 60, 0), font=font)
         badge_box = [4, max(0, py - 14), 78, py + 4]
         draw.rectangle(badge_box, fill=(26, 82, 118))
         draw.text(
