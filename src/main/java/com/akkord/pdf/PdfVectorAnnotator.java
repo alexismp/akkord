@@ -217,22 +217,22 @@ public final class PdfVectorAnnotator {
             double maxY,
             List<double[]> placedBoxes
     ) {
-        double[] dySteps = {0.0, 3.0, 6.0, -2.0, 9.0, 12.0};
-        double[] dxSteps = {0.0, 6.0, -6.0, 12.0, -12.0, 18.0};
+        double[] dySteps = {0.0, 2.5, -2.0, 5.0, 7.5, 10.0, 12.5};
+        double[] dxSteps = {0.0, 2.5, -2.5, 5.0, -5.0, 8.0, -8.0, 11.0};
 
         double bestX = startX;
         double bestY = startY;
         double bestScore = Double.MAX_VALUE;
 
-        for (double dy : dySteps) {
-            double candY = Math.clamp(startY + dy, minY, maxY);
-            for (double dx : dxSteps) {
-                double candX = Math.clamp(startX + dx, 30.0, Math.max(40.0, layout.widthPt() - boxW - 16.0));
+        for (double dx : dxSteps) {
+            double candX = Math.clamp(startX + dx, 30.0, Math.max(40.0, layout.widthPt() - boxW - 16.0));
+            for (double dy : dySteps) {
+                double candY = Math.clamp(startY + dy, minY, maxY);
                 if (overlapsExisting(candX, candY, boxW, boxH, placedBoxes)) {
                     continue;
                 }
                 double ink = sampleInkPenalty(layout, candX, candY, boxW, boxH);
-                double distPenalty = Math.abs(dx) * 0.45 + Math.abs(dy) * 0.65;
+                double distPenalty = Math.abs(dx) * 1.45 + Math.abs(dy) * 0.42;
                 double score = ink + distPenalty;
                 if (score < bestScore) {
                     bestScore = score;

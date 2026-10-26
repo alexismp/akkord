@@ -359,11 +359,15 @@ public final class HarmonyEngine {
         sb.append("You are an expert classical guitar & harmony professor analyzing PDF score '").append(pdfName).append("'.\n");
         sb.append(AkkordConfig.promptDirective(config.language())).append("\n");
         sb.append("""
-                CRITICAL KEY SIGNATURE & GUITAR LEDGER-LINE RULE:
+                CRITICAL KEY SIGNATURE, GUITAR LEDGER-LINE & BEAT-1 ALIGNMENT RULES:
                 - With 3 sharps (F#, C#, G#), carefully distinguish A Major (La majeur) vs F# Minor (Fa# mineur):
                   In classical guitar / Russian romance scores in A major, low open E (Mi grave, 3 ledger lines below treble staff) \
                   and low A (La grave, 2 ledger lines below staff) appear constantly as V-I bass pedaling (A <-> E7). \
                   Do NOT confuse low ledger-line A/E bass notes with F# or force F#m over an A major tonic!
+                - BEAT-1 HORIZONTAL ALIGNMENT RULE: Every chord symbol or review badge that applies to a measure MUST have its x_pt \
+                  aligned with Beat 1 of that specific measure (immediately to the right of that measure's left barline, typically barline_x + 8 pt, \
+                  or aligned with the first notehead/printed chord of that measure). NEVER place a measure's chord in the geometric center or second half \
+                  of the measure unless a second harmonic change genuinely occurs on Beat 2 or Beat 3, and NEVER shift a chord belonging to Measure 2 or 3 onto Measure 1!
                 Return valid JSON matching HarmonyAnalysisResult schema.
                 """);
         for (PageLayout pl : layoutRes.pages()) {
