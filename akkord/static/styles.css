@@ -888,8 +888,45 @@ input.user-valid-fallback {
 
 .header-auth-box {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.65rem;
+}
+
+.lang-switcher {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.16rem;
+  border-radius: 999px;
+  background: rgba(252, 250, 245, 0.1);
+  border: 1px solid rgba(230, 182, 100, 0.45);
+  backdrop-filter: blur(4px);
+}
+
+.lang-switch-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: rgba(248, 245, 238, 0.78);
+  font-family: var(--font-sans);
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  padding: 0.24rem 0.62rem;
+  border-radius: 999px;
+  cursor: pointer;
+  transition: background-color 0.16s ease, color 0.16s ease, box-shadow 0.16s ease;
+}
+
+.lang-switch-btn:hover:not(.active) {
+  color: #ffffff;
+  background: rgba(252, 250, 245, 0.12);
+}
+
+.lang-switch-btn.active {
+  background: #e6b664;
+  color: #151936;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
 }
 
 .auth-actions,
@@ -1614,6 +1651,14 @@ input.user-valid-fallback {
     --label-3: "In / Out / Think";
     --label-4: "Total Tokens";
     --label-5: "Coût ($ / €)";
+  }
+
+  :root[lang="en"] .usage-table {
+    --label-1: "Sheet";
+    --label-2: "Time & Model";
+    --label-3: "In / Out / Think";
+    --label-4: "Total Tokens";
+    --label-5: "Cost ($ / €)";
   }
 
   .usage-table td:nth-child(2)::before {
