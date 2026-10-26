@@ -814,7 +814,8 @@ Language Requirement:
 %s
 
 CRITICAL COORDINATE & DIAGRAM RULES:
-- x_pt MUST be in actual PDF points matching the red vertical guide lines on the image (typically between 75 and 755 for an 827pt wide page). Do NOT use 0..1000 normalized coordinates!
+- x_pt MUST be in actual PDF points matching the vertical guide lines on the image (typically between 75 and 755 for an 827pt wide page). Do NOT use 0..1000 normalized coordinates!
+- BEAT-1 HORIZONTAL ALIGNMENT RULE: Every chord symbol or review badge that applies to a measure MUST have its x_pt aligned with Beat 1 of that specific measure (immediately to the right of that measure's left barline, typically barline_x + 8 pt, or aligned with the first notehead/printed chord of that measure). NEVER place a measure's chord in the geometric center or second half of the measure unless a second harmonic change genuinely occurs on Beat 2 or Beat 3, and NEVER shift a chord belonging to Measure 2 or Measure 3 onto Measure 1!
 - In annotations, chord and suggested_chord MUST be ONLY a SINGLE compact chord symbol (max 12 characters, e.g. Bm(maj7)/A#, Bm7/A, Dm/F, Gm6/E, A7/C#). NEVER concatenate multiple chords or alternatives with / (e.g. NEVER write A7/Cdim7/C#7), NEVER output ASCII bar tables (|Am |Dm |...), and NEVER put solfège translations, fret fingerings [x-1-4-4-3-2], or explanations inside chord or suggested_chord! Keep note concise (1 short sentence, max 140 characters). Put detailed explanations in review_improvements and bass_line_proposals.
 - Use standard ASCII # and b for sharps and flats (do NOT use Unicode symbols).
 - chord_diagrams MUST contain up to 8 BASE guitar chords only (e.g., Am, Dm, E, E7, C, G, F, A7). NEVER put slash chords (like E7/G# or Dm/F) inside chord_diagrams; explain slash chords in slash_chord_notes and bass_line_proposals.

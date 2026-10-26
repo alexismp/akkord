@@ -727,12 +727,25 @@ fn draw_minimal_footnote_markers(
                     + ((raw_x - min_raw_x) / (max_raw_x - min_raw_x))
                         * (usable_right - usable_left);
             }
-            if ann.status == "improve" {
-                raw_x += 18.0;
+            let y = resolve_system_y(page_layout, &ann, true);
+            if ann.status == "improve"
+                && ink_density_in_rect(
+                    ink_grid,
+                    page_layout.ink_cols,
+                    page_layout.ink_rows,
+                    page_layout.width_pt,
+                    page_layout.height_pt,
+                    raw_x,
+                    y - pad_y,
+                    14.0,
+                    pill_h,
+                    0.5,
+                ) > 0.08
+            {
+                raw_x += 16.0;
             }
 
             let mut x = raw_x.clamp(36.0, page_layout.width_pt - pill_w - 20.0);
-            let y = resolve_system_y(page_layout, &ann, true);
             if x < last_right_edge + 3.0 {
                 x = (last_right_edge + 3.0).min(page_layout.width_pt - pill_w - 18.0);
             }
@@ -749,9 +762,9 @@ fn draw_minimal_footnote_markers(
                 pill_w,
                 pill_h,
                 (last_right_edge + 2.5)
-                    .max(x - pad_x - 20.0)
+                    .max(x - pad_x - 10.0)
                     .max(32.0),
-                (x - pad_x + pill_w + 28.0).min(page_layout.width_pt - 14.0),
+                (x - pad_x + pill_w + 12.0).min(page_layout.width_pt - 14.0),
                 y_min,
                 y_max,
                 &placed_rects,
