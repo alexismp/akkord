@@ -343,6 +343,7 @@ func (jq *JobQueueManager) CreateBatchJob(
 		"language":             lang,
 		"upload_to_drive":      uploadToDrive,
 		"user_email":           userEmail,
+		"owner_id":             NormalizeRecordOwnerID(oauthSessionID, userEmail),
 		"oauth_session_id":     oauthSessionID,
 		"status":               jobStatus,
 		"total_files":          len(items),
@@ -723,22 +724,52 @@ func (jq *JobQueueManager) recomputeJobSummary(jobDoc map[string]any) {
 	}
 }
 
+// NormalizeRecordOwnerID resolves the canonical owner_id ('user:<email>' or 'anon:<id>') for a job document.
+func NormalizeRecordOwnerID(ownerID, userEmail string) string {
+	cleanedOwner := strings.TrimSpace(ownerID)
+	if strings.HasPrefix(cleanedOwner, "user:") || strings.HasPrefix(cleanedOwner, "anon:") {
+		return cleanedOwner
+	}
+	cleanedEmail := strings.ToLower(strings.TrimSpace(userEmail))
+	if cleanedEmail != "" {
+		return "user:" + cleanedEmail
+	}
+	if cleanedOwner != "" {
+		return "anon:" + cleanedOwner
+	}
+	return "user:" + strings.ToLower(config.AdminEmail)
+}
+
+// JobBelongsToOwner returns true iff jobDoc belongs to ownerID.
+func JobBelongsToOwner(jobDoc map[string]any, ownerID string) bool {
+	if jobDoc == nil || ownerID == "" {
+		return false
+	}
+	docOwner, _ := jobDoc["owner_id"].(string)
+	docEmail, _ := jobDoc["user_email"].(string)
+	if docOwner == "" {
+		if sid, ok := jobDoc["oauth_session_id"].(string); ok {
+			docOwner = sid
+		}
+	}
+	return strings.EqualFold(NormalizeRecordOwnerID(docOwner, docEmail), ownerID)
+}
+
 // GetJob returns a job document by ID.
 func (jq *JobQueueManager) GetJob(jobID string) map[string]any {
 	return jq.Firestore.GetDoc("akkord_jobs", jobID)
 }
 
-// ListJobs lists recent batch jobs, optionally filtered by user email.
-func (jq *JobQueueManager) ListJobs(limit int, userEmail string) []map[string]any {
+// ListJobs lists recent batch jobs strictly filtered by ownerFilter (or all if ownerFilter == "").
+func (jq *JobQueueManager) ListJobs(limit int, ownerFilter string) []map[string]any {
 	if limit <= 0 {
 		limit = 20
 	}
 	docs := jq.Firestore.ListDocs("akkord_jobs", limit*2)
-	if userEmail != "" {
+	if ownerFilter != "" {
 		var filtered []map[string]any
 		for _, d := range docs {
-			em, _ := d["user_email"].(string)
-			if em == "" || strings.EqualFold(em, userEmail) {
+			if JobBelongsToOwner(d, ownerFilter) {
 				filtered = append(filtered, d)
 			}
 		}
@@ -755,12 +786,16 @@ func (jq *JobQueueManager) ListJobs(limit int, userEmail string) []map[string]an
 	return docs
 }
 
-// GetRecentHistory returns a flat list of recently processed sheet items across all jobs.
-func (jq *JobQueueManager) GetRecentHistory(limit int) []map[string]any {
+// GetRecentHistory returns a flat list of recently processed sheet items for the given ownerFilter.
+func (jq *JobQueueManager) GetRecentHistory(limit int, ownerFilter ...string) []map[string]any {
 	if limit <= 0 {
 		limit = 30
 	}
-	jobsList := jq.ListJobs(25, "")
+	filter := ""
+	if len(ownerFilter) > 0 {
+		filter = ownerFilter[0]
+	}
+	jobsList := jq.ListJobs(25, filter)
 	var history []map[string]any
 	for _, job := range jobsList {
 		jobID, _ := job["job_id"].(string)

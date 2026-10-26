@@ -162,6 +162,30 @@ func (s *Server) currentUser(r *http.Request) *oauth.UserSession {
 	return s.OAuth.GetSession(c.Value)
 }
 
+func (s *Server) resolveOwnerID(w http.ResponseWriter, r *http.Request) (*oauth.UserSession, string) {
+	user := s.currentUser(r)
+	if user != nil && strings.TrimSpace(user.Email) != "" {
+		return user, "user:" + strings.ToLower(strings.TrimSpace(user.Email))
+	}
+	if c, err := r.Cookie("akkord_anon"); err == nil && strings.TrimSpace(c.Value) != "" {
+		val := strings.TrimSpace(c.Value)
+		if strings.HasPrefix(val, "anon:") {
+			return nil, val
+		}
+		return nil, "anon:" + val
+	}
+	anonID := "anon_session_default"
+	http.SetCookie(w, &http.Cookie{
+		Name:     "akkord_anon",
+		Value:    anonID,
+		Path:     "/",
+		MaxAge:   30 * 24 * 3600,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	})
+	return nil, "anon:" + anonID
+}
+
 func (s *Server) handleIndexOrStatic(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/" {
 		indexPath := filepath.Join(s.StaticDir, "index.html")
@@ -182,12 +206,12 @@ func (s *Server) handleIndexOrStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
-	user := s.currentUser(r)
+	user, ownerID := s.resolveOwnerID(w, r)
 	var userDict any = map[string]any{"authenticated": false}
 	if user != nil {
 		userDict = user.ToPublicDict()
 	}
-	activeJobs := s.JobQueue.ListJobs(10, "")
+	activeJobs := s.JobQueue.ListJobs(10, ownerID)
 	var runningJob any
 	if len(activeJobs) > 0 {
 		for _, j := range activeJobs {
@@ -215,7 +239,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"daily_report_hour":  fmt.Sprintf("%02d:00", s.Activity.ReportHourLocal),
 		"daily_report_email": s.Activity.ReportEmail,
 		"active_job":         runningJob,
-		"recent_history":     s.JobQueue.GetRecentHistory(25),
+		"recent_history":     s.JobQueue.GetRecentHistory(25, ownerID),
 		"runtime_engine":     "go-rust-polyglot",
 	})
 }
@@ -322,10 +346,10 @@ func (s *Server) handleCreateDriveJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "drive_folder cannot be empty")
 		return
 	}
-	user := s.currentUser(r)
+	user, ownerID := s.resolveOwnerID(w, r)
 	oauthTok := ""
 	userEmail := ""
-	sessID := ""
+	sessID := ownerID
 	if user != nil {
 		oauthTok = user.AccessToken
 		userEmail = user.Email
@@ -393,9 +417,9 @@ func (s *Server) handleCreateUploadJob(w http.ResponseWriter, r *http.Request) {
 		model = config.DefaultModel
 	}
 	lang := config.NormalizeLanguage(r.FormValue("language"))
-	user := s.currentUser(r)
+	user, ownerID := s.resolveOwnerID(w, r)
 	userEmail := ""
-	sessID := ""
+	sessID := ownerID
 	if user != nil {
 		userEmail = user.Email
 		sessID = user.SessionID
@@ -436,14 +460,16 @@ func (s *Server) handleCreateUploadJob(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {
+	_, ownerID := s.resolveOwnerID(w, r)
 	writeJSON(w, http.StatusOK, map[string]any{
-		"jobs":           s.JobQueue.ListJobs(20, ""),
-		"recent_history": s.JobQueue.GetRecentHistory(30),
+		"jobs":           s.JobQueue.ListJobs(20, ownerID),
+		"recent_history": s.JobQueue.GetRecentHistory(30, ownerID),
 		"quota":          s.Activity.GetTodayQuotaStatus(),
 	})
 }
 
 func (s *Server) handleJobSubroutes(w http.ResponseWriter, r *http.Request) {
+	_, ownerID := s.resolveOwnerID(w, r)
 	trimmed := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
 	parts := strings.Split(strings.Trim(trimmed, "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
@@ -451,12 +477,16 @@ func (s *Server) handleJobSubroutes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	jobID := parts[0]
+	jobDoc := s.JobQueue.GetJob(jobID)
+	if jobDoc == nil {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("Job '%s' not found.", jobID))
+		return
+	}
+	if !jobs.JobBelongsToOwner(jobDoc, ownerID) {
+		writeError(w, http.StatusForbidden, "Accès refusé : ce traitement appartient à un autre utilisateur.")
+		return
+	}
 	if len(parts) == 1 {
-		jobDoc := s.JobQueue.GetJob(jobID)
-		if jobDoc == nil {
-			writeError(w, http.StatusNotFound, fmt.Sprintf("Job '%s' not found.", jobID))
-			return
-		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"job":   jobDoc,
 			"quota": s.Activity.GetTodayQuotaStatus(),
@@ -466,12 +496,12 @@ func (s *Server) handleJobSubroutes(w http.ResponseWriter, r *http.Request) {
 	action := parts[1]
 	switch action {
 	case "cancel":
-		jobDoc := s.JobQueue.CancelJob(jobID)
-		if errMsg, ok := jobDoc["error"].(string); ok && errMsg != "" {
+		cancelledDoc := s.JobQueue.CancelJob(jobID)
+		if errMsg, ok := cancelledDoc["error"].(string); ok && errMsg != "" {
 			writeError(w, http.StatusNotFound, errMsg)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"job": jobDoc})
+		writeJSON(w, http.StatusOK, map[string]any{"job": cancelledDoc})
 	case "download-zip":
 		zipBytes, zipName := s.JobQueue.BuildJobZipBytes(jobID)
 		if len(zipBytes) == 0 {
