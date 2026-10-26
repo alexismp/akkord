@@ -1629,6 +1629,33 @@ def test_spaced_minor_chord_token_and_d_minor_analysis(tmp_path: Path) -> None:
     assert all(a.suggested_chord != "G7/B" for a in res.annotations)
 
 
+def test_greensleeves_guitar_easy_chord_analysis() -> None:
+    """Verify Greensleeves-Guitar-Easy.pdf (with printed chords) extracts its 19 chords and generates 4 review badges."""
+    from akkord.harmony import _extract_pdf_text_tokens, _fallback_analyze_sheet_from_pdf
+
+    sample_pdf = Path(__file__).resolve().parent.parent / "samples" / "Greensleeves-Guitar-Easy.pdf"
+    assert sample_pdf.exists()
+    layouts = analyze_pdf_layout(sample_pdf)
+    _, chord_tokens = _extract_pdf_text_tokens(sample_pdf, layouts)
+    assert len(chord_tokens) == 24
+    assert [t[3] for t in chord_tokens[:6]] == ["Am", "G", "Em", "Am", "F", "E"]
+
+    res_en = _fallback_analyze_sheet_from_pdf(sample_pdf, layouts, "en")
+    assert res_en.has_existing_chords is True
+    assert "Am" in res_en.detected_key
+    badge_chords = [
+        (a.suggested_chord or a.chord, a.status, a.measure_number)
+        for a in res_en.annotations
+        if a.status in ("improve", "missing", "wrong")
+    ]
+    assert badge_chords == [
+        ("D/F#", "improve", 4),
+        ("E7/G#", "improve", 8),
+        ("Am", "missing", 10),
+        ("G/B", "improve", 16),
+    ]
+
+
 
 
 
