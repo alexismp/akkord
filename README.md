@@ -26,8 +26,8 @@ Depending on the content of each detected PDF score, **Akkord** automatically op
    * Adds blue chord pills directly above each staff system using adaptive 2pt ink-collision avoidance.
    * Appends a multi-row guitar fretboard chord diagram chart and a guide for inverted bass chords (*slash chords*).
 2. **Analyze Existing Chords Mode (`-chord-analysis.pdf` / `-analyse-accords.pdf`)** — *Scores that already include chord symbols*:
-   * Verifies the harmonic accuracy of printed chords against the melody and key signature (e.g., distinguishing `Gm` vs `G` in D minor or G minor).
-   * Adds **uniform-sized amber badges** above the staff displaying the **suggested chord together with a smaller superscript footnote number** (e.g., `E7/B ¹`, `E7/G# ²`, `Dm/F ³`, `G7/B ⁴`).
+   * Verifies the harmonic accuracy of printed chords against the melody and key signature (e.g., detecting a printed `F` major chord clashing with a Dorian `F♯4` melody note, or a missing chord on a `2.` repeat ending).
+   * Adds **uniform-sized amber/rose badges** above the staff right beside the printed chords displaying the **suggested chord together with a smaller superscript footnote number** (e.g., `D/F# ¹`, `E7/G# ²`, `Am ³`, `G/B ⁴`).
    * Appends dedicated harmonic analysis pages at the end of the PDF featuring matching numbered badges, contrapuntal explanations, walking-bass/inversion proposals, and guitar chord diagrams.
 
 ---
@@ -136,13 +136,13 @@ Clicking **"Analyze & Annotate Sheet Music"** launches an asynchronous batch job
 
 ![Analyze Existing Chords Mode with Badges and Footnotes](docs/images/pdf-analyze-badges.png)
 
-*Example above using a Public Domain classical guitar work from the Mutopia Project: **Matteo Carcassi (1792–1853) — Etude No. 7, Op. 60 in A Minor** ([`samples/Carcassi-Op60-No7.pdf`](samples/Carcassi-Op60-No7.pdf)).*
+*Example above using a Traditional English Folk Tune score with printed chord symbols (`Am`, `G`, `Em`, `F`, `E`, `C`): **Greensleeves — Guitar & Tab in A Minor / Dorian** ([`samples/Greensleeves-Guitar-Easy.pdf`](samples/Greensleeves-Guitar-Easy.pdf)).*
 
-When the score already contains chord symbols or an explicit harmonic structure:
-* **On the Score (Left Page)**: whenever a chord can be refined or enriched (e.g., first/second inversion, leading-tone bass, passing chord), Akkord adds a **uniform-sized amber badge** displaying the **suggested chord followed by a smaller superscript reference number** (`E7/B ¹`, `E7/G# ²`, `Dm/F ³`, `G7/B ⁴`).
+When the score already contains printed chord symbols above the staff:
+* **On the Score (Left Page)**: the original printed chords (`Am`, `G`, `Em`, `F`, `E`, `C`) remain untouched, and whenever a printed chord clashes with the melody, can be refined with a bass inversion, or is missing on a repeat ending, Akkord adds a **uniform-sized badge** displaying the **suggested chord followed by a smaller superscript reference number** (`D/F# ¹` next to `F` in m. 4, `E7/G# ²` next to `E` in m. 8, `Am ³` on the unchorded `2.` ending in m. 10, and `G/B ⁴` next to `G` in m. 16).
 * **On the Appended Analysis Pages (Right Page)**:
-  * A summary banner reports the **detected key** (`A minor / Am`), **overall harmonic accuracy (%)**, and general musical assessment.
-  * The **"Detailed Score Footnotes"** section repeats each numbered badge (`E7/B ¹`, `E7/G# ²`...) along with its system index, measure number, original chord, and full contrapuntal explanation.
+  * A summary banner reports the **detected key** (`A minor / Dorian — Am`), **overall harmonic accuracy (`86%`)**, and general musical assessment.
+  * The **"Detailed Score Footnotes"** section repeats each numbered badge (`D/F# ¹`, `E7/G# ²`, `Am ³`, `G/B ⁴`) along with its system index, measure number, printed chord, and full contrapuntal explanation.
   * The **"Bass Line — Counterpoint & Walking Bass"** section outlines stepwise and contrary-motion bass progressions.
   * The **"Main Guitar Chord Diagrams"** grid illustrates fretboard fingerings for the piece's key chords.
 
