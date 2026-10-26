@@ -40,7 +40,12 @@ from akkord.activity import DAILY_FILE_LIMIT, ActivityManager
 from akkord.config import AkkordConfig
 from akkord.drive import DriveConnector, SheetFile
 from akkord.harmony import HarmonyAnalysisResult, compute_harmony_accuracy_score
-from akkord.oauth import DEFAULT_OAUTH_CLIENT_ID, DEFAULT_OAUTH_CLIENT_SECRET
+from akkord.oauth import (
+    ADMIN_EMAIL,
+    DEFAULT_OAUTH_CLIENT_ID,
+    DEFAULT_OAUTH_CLIENT_SECRET,
+    normalize_record_owner_id,
+)
 from akkord.pipeline import AkkordPipeline
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
@@ -247,6 +252,7 @@ class BatchJob:
     percent: int = 0
     items: list[JobItem] = field(default_factory=list)
     oauth_tokens: dict[str, str] = field(default_factory=dict)
+    owner_id: str = ""
 
 
 class JobQueueManager:
@@ -276,6 +282,27 @@ class JobQueueManager:
     def _now_paris(self) -> datetime:
         return datetime.now(PARIS_TZ)
 
+    @staticmethod
+    def _construct_batch_job_from_dict(data: dict[str, Any]) -> BatchJob:
+        allowed_item_keys = set(JobItem.__dataclass_fields__.keys())
+        allowed_job_keys = set(BatchJob.__dataclass_fields__.keys()) - {"items"}
+        items = [
+            JobItem(**{k: v for k, v in it.items() if k in allowed_item_keys})
+            for it in (data.get("items") or [])
+            if isinstance(it, dict)
+        ]
+        job_kwargs = {k: v for k, v in data.items() if k in allowed_job_keys}
+        job = BatchJob(**job_kwargs, items=items)
+        job.owner_id = normalize_record_owner_id(job.owner_id, job.user_email)
+        return job
+
+    @staticmethod
+    def job_belongs_to_owner(job: BatchJob, owner_id: str) -> bool:
+        """Return True iff the given BatchJob belongs to `owner_id`."""
+        if not owner_id:
+            return False
+        return normalize_record_owner_id(job.owner_id, job.user_email) == owner_id
+
     def _load_existing_jobs(self) -> None:
         fs = getattr(self.activity_manager, "firestore_backend", None)
         fs_enabled = fs is not None and getattr(fs, "enabled", False)
@@ -290,9 +317,7 @@ class JobQueueManager:
             if not isinstance(data, dict) or "job_id" not in data:
                 continue
             try:
-                items = [JobItem(**it) for it in data.get("items", [])]
-                job_kwargs = {k: v for k, v in data.items() if k != "items"}
-                job = BatchJob(**job_kwargs, items=items)
+                job = self._construct_batch_job_from_dict(data)
                 self._jobs[job.job_id] = job
             except Exception:
                 pass
@@ -303,9 +328,7 @@ class JobQueueManager:
                 for jid, data in fs_jobs.items():
                     if jid in self._jobs or not isinstance(data, dict) or "job_id" not in data:
                         continue
-                    items = [JobItem(**it) for it in data.get("items", [])]
-                    job_kwargs = {k: v for k, v in data.items() if k != "items"}
-                    self._jobs[jid] = BatchJob(**job_kwargs, items=items)
+                    self._jobs[jid] = self._construct_batch_job_from_dict(data)
             except Exception:
                 pass
         self._last_jobs_sync_ts = time.monotonic()
@@ -432,28 +455,27 @@ class JobQueueManager:
                     if fs is not None:
                         data = fs.get_document("akkord_jobs", job_id)
                 if isinstance(data, dict) and "job_id" in data:
-                    items = [JobItem(**it) for it in data.get("items", [])]
-                    job_kwargs = {k: v for k, v in data.items() if k != "items"}
-                    self._jobs[job_id] = BatchJob(**job_kwargs, items=items)
+                    self._jobs[job_id] = self._construct_batch_job_from_dict(data)
             return self._jobs.get(job_id)
 
-    def list_jobs(self, limit: int = 10) -> list[BatchJob]:
+    def list_jobs(self, limit: int = 10, owner_id: str | None = None) -> list[BatchJob]:
         with self._lock:
             now_ts = time.monotonic()
             if (self.gcs.enabled or getattr(getattr(self.activity_manager, "firestore_backend", None), "enabled", False)) and (
                 not self._jobs or (now_ts - self._last_jobs_sync_ts) > 5.0
             ):
                 self._load_existing_jobs()
-            jobs = sorted(
-                self._jobs.values(), key=lambda j: j.created_at, reverse=True
-            )
+            all_jobs = list(self._jobs.values())
+            if owner_id is not None:
+                all_jobs = [j for j in all_jobs if self.job_belongs_to_owner(j, owner_id)]
+            jobs = sorted(all_jobs, key=lambda j: j.created_at, reverse=True)
             return jobs[:limit]
 
     def get_recent_history(
-        self, limit: int = 25, is_admin: bool = False
+        self, limit: int = 25, is_admin: bool = False, owner_id: str | None = None
     ) -> list[dict[str, Any]]:
-        """Collect recent analyzed items across batch jobs and daily activity logs so page refresh restores full history."""
-        recent_jobs = self.list_jobs(limit=15)
+        """Collect recent analyzed items across batch jobs and daily activity logs for `owner_id` so page refresh restores only the caller's history."""
+        recent_jobs = self.list_jobs(limit=15, owner_id=owner_id)
         history_items: list[dict[str, Any]] = []
         seen_keys: set[str] = set()
 
@@ -473,10 +495,15 @@ class JobQueueManager:
                 if len(history_items) >= limit:
                     return history_items
 
-        # Also include any standalone analyses recorded in ActivityManager that were not part of a BatchJob
+        # Also include any standalone analyses recorded in ActivityManager that belong to `owner_id`
         try:
             today_rec = self.activity_manager.get_today_record()
             for idx, entry in enumerate(reversed(today_rec.entries), start=1):
+                entry_owner = normalize_record_owner_id(
+                    getattr(entry, "owner_id", ""), entry.user_email
+                )
+                if owner_id is not None and entry_owner != owner_id:
+                    continue
                 dedup_key = f"{entry.filename}::{entry.output_filename}"
                 if dedup_key in seen_keys or any(
                     k.startswith(f"{entry.filename}::") for k in seen_keys
@@ -495,8 +522,8 @@ class JobQueueManager:
                     "language": entry.language or "fr",
                     "model": entry.model,
                     "output_filename": safe_out,
-                    "download_url": f"/api/outputs/{safe_out}" if safe_out else "",
-                    "original_url": f"/api/originals/{safe_orig}" if safe_orig else "",
+                    "download_url": f"/api/outputs/{quote(safe_out)}" if safe_out else "",
+                    "original_url": f"/api/originals/{quote(safe_orig)}" if safe_orig else "",
                     "overall_summary": entry.overall_summary,
                     "error": entry.error,
                 }
@@ -545,8 +572,18 @@ class JobQueueManager:
             data = asdict(job)
         data.pop("oauth_tokens", None)
         for it in data.get("items", []):
+            safe_orig = Path(str(it.get("filename") or "")).name
+            safe_out = Path(str(it.get("output_filename") or "")).name
+            if safe_orig:
+                it["original_url"] = f"/api/jobs/{job.job_id}/originals/{quote(safe_orig)}"
+            if safe_out:
+                it["download_url"] = f"/api/jobs/{job.job_id}/outputs/{quote(safe_out)}"
             rep = it.get("report")
             if isinstance(rep, dict):
+                if safe_orig:
+                    rep["original_url"] = it["original_url"]
+                if safe_out:
+                    rep["download_url"] = it["download_url"]
                 detail = rep.get("analysis_detail")
                 if isinstance(detail, dict) and rep.get("mode") == "analyze":
                     try:
@@ -592,11 +629,13 @@ class JobQueueManager:
         is_admin: bool = False,
         oauth_tokens: dict[str, str] | None = None,
         run_async: bool = True,
+        owner_id: str = "",
     ) -> BatchJob:
         """Create a new BatchJob, split items into today's quota vs deferred_next_day, and enqueue tasks."""
         self.activity_manager.reset_cancel()
         now = self._now_paris()
         job_id = f"job-{now.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
+        effective_owner_id = normalize_record_owner_id(owner_id, user_email)
 
         quota = self.activity_manager.get_quota_status()
         remaining_today = int(quota.get("remaining", DAILY_FILE_LIMIT))
@@ -614,10 +653,10 @@ class JobQueueManager:
         items: list[JobItem] = []
         for idx, sh in enumerate(sheets, start=1):
             item_id = f"item-{idx:04d}"
+            safe_name = Path(sh.name).name
             gcs_orig_key = ""
             if sh.local_path and sh.local_path.is_file():
-                safe_name = Path(sh.name).name
-                gcs_orig_key = f"originals/{safe_name}"
+                gcs_orig_key = f"jobs/{job_id}/originals/{safe_name}"
                 try:
                     self.gcs.write_bytes(
                         gcs_orig_key,
@@ -655,7 +694,7 @@ class JobQueueManager:
                         if status == "queued"
                         else f"Reporté automatiquement au {scheduled_for[:10]} (quota de {DAILY_FILE_LIMIT} fichiers/jour)"
                     ),
-                    original_url=f"/api/originals/{Path(sh.name).name}",
+                    original_url=f"/api/jobs/{job_id}/originals/{quote(safe_name)}",
                 )
             )
 
@@ -671,6 +710,7 @@ class JobQueueManager:
             is_admin=is_admin,
             items=items,
             oauth_tokens=oauth_tokens or {},
+            owner_id=effective_owner_id,
         )
         self._save_job(job)
 
@@ -881,7 +921,7 @@ class JobQueueManager:
             )
             rep_dict = pipeline.report_to_dict(report)
 
-            # Persist original PDF to GCS/uploads for on-demand preview
+            # Persist original PDF to GCS/uploads under job-scoped namespace for private on-demand preview
             safe_orig_name = Path(item.filename).name
             orig_bytes: bytes | None = None
             if sheet.local_path and sheet.local_path.is_file():
@@ -889,21 +929,24 @@ class JobQueueManager:
             if orig_bytes:
                 # Keep local copy only when GCS is not active (so Cloud Run /tmp stays clean)
                 self.gcs.write_bytes(
-                    f"originals/{safe_orig_name}",
+                    f"jobs/{job.job_id}/originals/{safe_orig_name}",
                     orig_bytes,
                     content_type="application/pdf",
                     keep_local_copy=not self.gcs.enabled,
                 )
                 uploads_dir = self.storage_dir / "_uploads"
+                job_uploads_dir = uploads_dir / job.job_id
                 if not self.gcs.enabled:
-                    uploads_dir.mkdir(parents=True, exist_ok=True)
-                    (uploads_dir / safe_orig_name).write_bytes(orig_bytes)
+                    job_uploads_dir.mkdir(parents=True, exist_ok=True)
+                    (job_uploads_dir / safe_orig_name).write_bytes(orig_bytes)
                 elif (uploads_dir / safe_orig_name).is_file():
                     try:
                         (uploads_dir / safe_orig_name).unlink()
                     except Exception:
                         pass
-                rep_dict["original_url"] = f"/api/originals/{safe_orig_name}"
+                rep_dict["original_url"] = (
+                    f"/api/jobs/{job.job_id}/originals/{quote(safe_orig_name)}"
+                )
                 item.original_url = rep_dict["original_url"]
 
             if report.output_filename and report.output_pdf_path:
@@ -911,25 +954,33 @@ class JobQueueManager:
                 if out_path.is_file():
                     out_bytes = out_path.read_bytes()
                     self.gcs.write_bytes(
-                        f"outputs/{report.output_filename}",
+                        f"jobs/{job.job_id}/outputs/{report.output_filename}",
                         out_bytes,
                         content_type="application/pdf",
                         keep_local_copy=not self.gcs.enabled,
                     )
-                    if self.gcs.enabled:
+                    if not self.gcs.enabled:
+                        job_out_dir = self.storage_dir / "jobs" / job.job_id / "outputs"
+                        job_out_dir.mkdir(parents=True, exist_ok=True)
+                        (job_out_dir / report.output_filename).write_bytes(out_bytes)
+                    else:
                         try:
                             out_path.unlink()
                         except Exception:
                             pass
-                rep_dict["download_url"] = f"/api/outputs/{report.output_filename}"
+                rep_dict["download_url"] = (
+                    f"/api/jobs/{job.job_id}/outputs/{quote(report.output_filename)}"
+                )
                 item.output_filename = report.output_filename
                 item.download_url = rep_dict["download_url"]
 
+            effective_owner_id = normalize_record_owner_id(job.owner_id, job.user_email)
             if not was_already_completed:
                 self.activity_manager.record_analysis(
                     rep_dict,
                     user_email=job.user_email,
                     source=item.source,
+                    owner_id=effective_owner_id,
                 )
 
             item.status = "completed" if report.is_music_sheet else "skipped"
@@ -952,6 +1003,7 @@ class JobQueueManager:
                 err_rep,
                 user_email=job.user_email,
                 source=item.source,
+                owner_id=normalize_record_owner_id(job.owner_id, job.user_email),
             )
             item.status = "error"
             item.stage = "done"
@@ -965,18 +1017,25 @@ class JobQueueManager:
             shutil.rmtree(temp_work_dir, ignore_errors=True)
             gc.collect()
 
-    def cancel_job(self, job_id: str | None = None) -> BatchJob | None:
-        """Cancel a specific job (or the most recent active job) and mark queued/deferred items cancelled."""
+    def cancel_job(
+        self, job_id: str | None = None, owner_id: str | None = None
+    ) -> BatchJob | None:
+        """Cancel a specific job (or the most recent active job owned by `owner_id`) and mark queued/deferred items cancelled."""
         self.activity_manager.request_cancel()
         with self._lock:
             target: BatchJob | None = None
             if job_id:
-                target = self.get_job(job_id)
+                cand = self.get_job(job_id)
+                if cand is not None and (
+                    owner_id is None or self.job_belongs_to_owner(cand, owner_id)
+                ):
+                    target = cand
             else:
                 active = [
                     j
                     for j in self._jobs.values()
                     if j.status in ("running", "partially_deferred")
+                    and (owner_id is None or self.job_belongs_to_owner(j, owner_id))
                 ]
                 if active:
                     active.sort(key=lambda j: j.created_at, reverse=True)
@@ -992,6 +1051,30 @@ class JobQueueManager:
             target.status = "cancelled"
             self._save_job(target)
             return target
+
+    def claim_anonymous_jobs(
+        self, anon_owner_id: str, user_email: str, is_admin: bool = False
+    ) -> int:
+        """Transfer ownership of any jobs created under `anon_owner_id` in this browser tab to the newly logged-in Google user."""
+        cleaned_anon = (anon_owner_id or "").strip()
+        cleaned_email = (user_email or "").strip()
+        if not cleaned_anon or not cleaned_email:
+            return 0
+        target_owner = f"user:{cleaned_email.lower()}"
+        claimed_count = 0
+        with self._lock:
+            for job in list(self._jobs.values()):
+                if self.job_belongs_to_owner(job, cleaned_anon):
+                    job.owner_id = target_owner
+                    job.user_email = cleaned_email
+                    job.is_admin = is_admin
+                    self._save_job(job)
+                    claimed_count += 1
+        try:
+            self.activity_manager.claim_anonymous_entries(cleaned_anon, cleaned_email)
+        except Exception:
+            pass
+        return claimed_count
 
     def resume_deferred_jobs(self, process_immediately_if_local: bool = False) -> dict[str, Any]:
         """Promote up to today's remaining quota (25 files/day) of `deferred_next_day` items to `queued` and dispatch them."""
@@ -1096,7 +1179,7 @@ class JobQueueManager:
             for it in job.items:
                 if not it.output_filename:
                     continue
-                pdf_bytes = self.read_output_pdf(it.output_filename)
+                pdf_bytes = self.read_output_pdf(it.output_filename, job_id=job.job_id)
                 if pdf_bytes:
                     zf.writestr(it.output_filename, pdf_bytes)
                     added_count += 1
@@ -1106,16 +1189,68 @@ class JobQueueManager:
         zip_name = f"akkord-{job_id}-partitions-annotees.zip"
         return buf.getvalue(), zip_name
 
-    def read_output_pdf(self, filename: str) -> bytes | None:
+    def read_output_pdf(self, filename: str, job_id: str | None = None) -> bytes | None:
         safe_name = Path(filename).name
+        if job_id:
+            job_local = (self.storage_dir / "jobs" / job_id / "outputs" / safe_name).resolve()
+            if job_local.is_file():
+                return job_local.read_bytes()
+            job_gcs = self.gcs.read_bytes(f"jobs/{job_id}/outputs/{safe_name}")
+            if job_gcs:
+                return job_gcs
         local_candidate = (self.storage_dir / safe_name).resolve()
         if local_candidate.is_file():
             return local_candidate.read_bytes()
         return self.gcs.read_bytes(f"outputs/{safe_name}")
 
-    def read_original_pdf(self, filename: str) -> bytes | None:
+    def read_original_pdf(self, filename: str, job_id: str | None = None) -> bytes | None:
         safe_name = Path(filename).name
+        if job_id:
+            job_local = (self.storage_dir / "_uploads" / job_id / safe_name).resolve()
+            if job_local.is_file():
+                return job_local.read_bytes()
+            job_gcs = self.gcs.read_bytes(f"jobs/{job_id}/originals/{safe_name}")
+            if job_gcs:
+                return job_gcs
         local_candidate = (self.storage_dir / "_uploads" / safe_name).resolve()
         if local_candidate.is_file():
             return local_candidate.read_bytes()
         return self.gcs.read_bytes(f"originals/{safe_name}")
+
+    def user_owns_filename(
+        self, owner_id: str, filename: str, is_original: bool = False
+    ) -> bool:
+        """Verify whether `owner_id` owns any job or activity record referencing `filename`."""
+        if not owner_id:
+            return False
+        safe_name = Path(filename).name
+        for job in self.list_jobs(limit=200, owner_id=owner_id):
+            for it in job.items:
+                if is_original:
+                    if Path(it.filename).name == safe_name:
+                        return True
+                else:
+                    if Path(it.output_filename).name == safe_name:
+                        return True
+                    rep = it.report or {}
+                    if Path(str(rep.get("output_filename") or "")).name == safe_name:
+                        return True
+
+        try:
+            self.activity_manager.get_today_record()
+            with self.activity_manager._lock:
+                records = list(self.activity_manager._records.values())
+            for rec in records:
+                for entry in rec.entries:
+                    entry_owner = normalize_record_owner_id(
+                        getattr(entry, "owner_id", ""), entry.user_email
+                    )
+                    if entry_owner != owner_id:
+                        continue
+                    if is_original and Path(entry.filename).name == safe_name:
+                        return True
+                    if not is_original and Path(entry.output_filename).name == safe_name:
+                        return True
+        except Exception:
+            pass
+        return False

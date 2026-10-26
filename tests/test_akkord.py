@@ -1053,7 +1053,7 @@ def test_firestore_persistence_across_deployments_and_sessions(tmp_path: Path) -
 
 
 def test_unicode_cyrillic_pdf_preview_headers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Verify /api/originals and /api/outputs serve Cyrillic/Unicode PDFs from GCS without UnicodeEncodeError."""
+    """Verify /api/originals and /api/outputs reject non-owners (403) and serve Cyrillic/Unicode PDFs to the owner without UnicodeEncodeError."""
     from urllib.parse import quote
 
     cyrillic_orig = "Чубчик.pdf"
@@ -1061,13 +1061,23 @@ def test_unicode_cyrillic_pdf_preview_headers(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr(
         "akkord.server.job_queue_manager.read_original_pdf",
-        lambda name: b"%PDF-1.4 fake orig" if name == cyrillic_orig else None,
+        lambda name, job_id=None: b"%PDF-1.4 fake orig" if name == cyrillic_orig else None,
     )
     monkeypatch.setattr(
         "akkord.server.job_queue_manager.read_output_pdf",
-        lambda name: b"%PDF-1.4 fake out" if name == cyrillic_out else None,
+        lambda name, job_id=None: b"%PDF-1.4 fake out" if name == cyrillic_out else None,
     )
 
+    # 1. Unauthenticated visitor who does not own the file gets 403 Forbidden
+    anon_client = TestClient(app)
+    assert anon_client.get(f"/api/originals/{quote(cyrillic_orig)}").status_code == 403
+    assert anon_client.get(f"/api/outputs/{quote(cyrillic_out)}").status_code == 403
+
+    # 2. Authorized owner gets 200 OK with RFC 5987 UTF-8 Content-Disposition header
+    monkeypatch.setattr(
+        "akkord.server.job_queue_manager.user_owns_filename",
+        lambda owner_id, filename, is_original=False: filename in (cyrillic_orig, cyrillic_out),
+    )
     client = TestClient(app)
     r_orig = client.get(f"/api/originals/{quote(cyrillic_orig)}")
     assert r_orig.status_code == 200
@@ -1712,6 +1722,216 @@ def test_beat1_snapping_within_each_measure_without_crossing_measures() -> None:
     # Measure 4's two chords remain distinct at 398.0 and 475.0
     assert xs[2] == 398.0
     assert xs[3] == 475.0
+
+
+def test_strict_user_and_anonymous_privacy_isolation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify that documents, jobs, and analyses are strictly private to their owner and never leaked across users or anonymous visitors."""
+    from akkord.activity import ActivityManager
+    from akkord.drive import SheetFile
+    from akkord.firestore_store import FirestoreBackend
+    from akkord.job_queue import GCSStorageBackend, JobQueueManager
+    from akkord.oauth import UserSession
+    import akkord.server as srv
+
+    sample_pdf = create_sample_sheet_without_chords(tmp_path / "private_score.pdf")
+    monkeypatch.setattr(
+        "akkord.pipeline.HarmonyEngine.analyze_sheet",
+        lambda self, layouts, pdf_path=None: HarmonyAnalysisResult(
+            is_music_sheet=True,
+            has_existing_chords=False,
+            title="Private Score",
+            detected_key="Am",
+            overall_summary="Strictly private analysis.",
+            accuracy_score=100,
+            annotations=[
+                ChordAnnotation(
+                    page_num=1, system_index=1, x_pt=100, chord="Am", status="added"
+                )
+            ],
+            chord_diagrams=[
+                GuitarDiagram(name="Am (La m)", frets=["x", "0", "2", "2", "1", "0"])
+            ],
+        ),
+    )
+
+    store_dir = tmp_path / "privacy_store"
+    fs = FirestoreBackend(store_dir)
+    gcs = GCSStorageBackend(store_dir)
+    act_mgr = ActivityManager(store_dir, gcs_backend=gcs, firestore_backend=fs)
+    q_mgr = JobQueueManager(store_dir, activity_manager=act_mgr, gcs_backend=gcs)
+
+    monkeypatch.setattr(srv, "activity_manager", act_mgr)
+    monkeypatch.setattr(srv, "job_queue_manager", q_mgr)
+    monkeypatch.setattr(srv, "OUTPUTS_DIR", store_dir)
+    monkeypatch.setattr(srv, "UPLOADS_DIR", store_dir / "_uploads")
+
+    # 1. Create a job owned by alexis.mp@gmail.com and a legacy job with empty user_email/owner_id
+    admin_job = q_mgr.create_batch_job(
+        sheets=[
+            SheetFile(
+                id="alexis-secret.pdf",
+                name="alexis-secret.pdf",
+                source="upload",
+                local_path=sample_pdf,
+            )
+        ],
+        folder="upload",
+        language="fr",
+        model="gemini-4-argon",
+        upload_to_drive=False,
+        user_email="alexis.mp@gmail.com",
+        is_admin=True,
+        run_async=False,
+        owner_id="user:alexis.mp@gmail.com",
+    )
+    q_mgr.process_job_item(admin_job.job_id, admin_job.items[0].item_id)
+
+    legacy_job = q_mgr.create_batch_job(
+        sheets=[
+            SheetFile(
+                id="legacy-untagged.pdf",
+                name="legacy-untagged.pdf",
+                source="upload",
+                local_path=sample_pdf,
+            )
+        ],
+        folder="upload",
+        language="fr",
+        model="gemini-4-argon",
+        upload_to_drive=False,
+        user_email="",
+        is_admin=False,
+        run_async=False,
+        owner_id="",
+    )
+    q_mgr.process_job_item(legacy_job.job_id, legacy_job.items[0].item_id)
+
+    # 2. Unauthenticated visitor visits the app -> MUST see 0 jobs and 0 history_items!
+    anon_visitor = TestClient(app)
+    r_jobs_anon = anon_visitor.get("/api/jobs")
+    assert r_jobs_anon.status_code == 200
+    assert r_jobs_anon.json()["jobs"] == []
+    assert r_jobs_anon.json()["history_items"] == []
+    assert "akkord_anon" in anon_visitor.cookies
+
+    # Unauthenticated visitor attempting to access alexis.mp@gmail.com's job, ZIP, or PDFs gets 403 Forbidden
+    assert anon_visitor.get(f"/api/jobs/{admin_job.job_id}").status_code == 403
+    assert anon_visitor.post(f"/api/jobs/{admin_job.job_id}/cancel").status_code == 403
+    assert anon_visitor.get(f"/api/jobs/{admin_job.job_id}/download-zip").status_code == 403
+    assert (
+        anon_visitor.get(
+            f"/api/jobs/{admin_job.job_id}/outputs/alexis-secret-avec-accords.pdf"
+        ).status_code
+        == 403
+    )
+    assert (
+        anon_visitor.get(
+            f"/api/jobs/{admin_job.job_id}/originals/alexis-secret.pdf"
+        ).status_code
+        == 403
+    )
+    assert (
+        anon_visitor.get("/api/outputs/alexis-secret-avec-accords.pdf").status_code
+        == 403
+    )
+    assert anon_visitor.get("/api/originals/alexis-secret.pdf").status_code == 403
+
+    # 3. Authenticated user B (other@example.com) also cannot see or download alexis.mp@gmail.com's jobs/files
+    other_cookie = srv.oauth_manager.encode_session_cookie(
+        UserSession(
+            session_id="other-sess",
+            email="other@example.com",
+            name="Other User",
+            picture="",
+            access_token="tok-other",
+            refresh_token="ref-other",
+        )
+    )
+    other_client = TestClient(app)
+    other_client.cookies.set("akkord_session", other_cookie)
+    r_jobs_other = other_client.get("/api/jobs")
+    assert r_jobs_other.status_code == 200
+    assert r_jobs_other.json()["jobs"] == []
+    assert r_jobs_other.json()["history_items"] == []
+    assert other_client.get(f"/api/jobs/{admin_job.job_id}").status_code == 403
+
+    # 4. Anonymous visitor A uploads a PDF -> only Anonymous visitor A can see & download it; Anonymous visitor B cannot
+    monkeypatch.setattr(q_mgr, "_dispatch_job_items", lambda job: None)
+    with open(sample_pdf, "rb") as f:
+        r_anon_up = anon_visitor.post(
+            "/api/jobs/upload",
+            files=[("files", ("anon-a-sheet.pdf", f, "application/pdf"))],
+            data={"language": "fr", "model": "gemini-4-argon"},
+        )
+    assert r_anon_up.status_code == 202
+    anon_job_id = r_anon_up.json()["job_id"]
+    q_mgr.process_job_item(anon_job_id, "item-0001")
+
+    # Anonymous visitor A sees their own job and can download their annotated PDF
+    r_anon_a_list = anon_visitor.get("/api/jobs")
+    assert len(r_anon_a_list.json()["jobs"]) == 1
+    assert r_anon_a_list.json()["jobs"][0]["job_id"] == anon_job_id
+    r_anon_a_pdf = anon_visitor.get(
+        f"/api/jobs/{anon_job_id}/outputs/anon-a-sheet-avec-accords.pdf"
+    )
+    assert r_anon_a_pdf.status_code == 200
+
+    # Anonymous visitor B (different browser) sees nothing and gets 403 on Anonymous visitor A's job/PDF
+    anon_visitor_b = TestClient(app)
+    assert anon_visitor_b.get("/api/jobs").json()["jobs"] == []
+    assert anon_visitor_b.get(f"/api/jobs/{anon_job_id}").status_code == 403
+    assert (
+        anon_visitor_b.get(
+            f"/api/jobs/{anon_job_id}/outputs/anon-a-sheet-avec-accords.pdf"
+        ).status_code
+        == 403
+    )
+
+    # 5. Even when alexis.mp@gmail.com logs in, their main workspace (/api/jobs) only shows their own jobs (not anon_visitor's job),
+    # while the Admin Token/Cost summary (/api/admin/usage) tracks all 3 processed files!
+    admin_cookie = srv.oauth_manager.encode_session_cookie(
+        UserSession(
+            session_id="adm-sess",
+            email="alexis.mp@gmail.com",
+            name="Alexis MP",
+            picture="",
+            access_token="tok-adm",
+            refresh_token="ref-adm",
+        )
+    )
+    admin_client = TestClient(app)
+    admin_client.cookies.set("akkord_session", admin_cookie)
+    r_admin_jobs = admin_client.get("/api/jobs").json()
+    admin_job_ids = {j["job_id"] for j in r_admin_jobs["jobs"]}
+    assert admin_job.job_id in admin_job_ids
+    assert legacy_job.job_id in admin_job_ids
+    assert anon_job_id not in admin_job_ids
+    assert (
+        admin_client.get(
+            f"/api/jobs/{admin_job.job_id}/outputs/alexis-secret-avec-accords.pdf"
+        ).status_code
+        == 200
+    )
+
+    r_admin_usage = admin_client.get("/api/admin/usage").json()
+    assert r_admin_usage["today"]["files_count"] == 3
+
+    # 6. Logging out clears the session and rotates akkord_anon so /api/jobs immediately returns empty
+    r_logout = admin_client.post("/api/auth/logout")
+    assert r_logout.status_code == 200
+    assert admin_client.get("/api/jobs").json()["jobs"] == []
+    assert admin_client.get("/api/jobs").json()["history_items"] == []
+    assert admin_client.get(f"/api/jobs/{admin_job.job_id}").status_code == 403
+
+    # 7. Claiming anonymous jobs upon OAuth login transfers ownership to the authenticated user
+    anon_id_a = srv.oauth_manager.decode_anon_cookie(anon_visitor.cookies.get("akkord_anon"))
+    assert anon_id_a is not None
+    claimed = q_mgr.claim_anonymous_jobs(f"anon:{anon_id_a}", "other@example.com")
+    assert claimed == 1
+    assert other_client.get(f"/api/jobs/{anon_job_id}").status_code == 200
+
 
 
 

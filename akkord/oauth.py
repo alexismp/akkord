@@ -32,6 +32,21 @@ import httpx
 from akkord.firestore_store import FirestoreBackend
 
 ADMIN_EMAIL = "alexis.mp@gmail.com"
+ANON_COOKIE_NAME = "akkord_anon"
+
+
+def normalize_record_owner_id(owner_id: str | None, user_email: str | None) -> str:
+    """Resolve canonical owner_id ('user:<email>' or 'anon:<id>'); attribute legacy unowned records to ADMIN_EMAIL."""
+    cleaned_owner = (owner_id or "").strip()
+    if cleaned_owner:
+        if cleaned_owner.startswith("user:"):
+            return f"user:{cleaned_owner[5:].strip().lower()}"
+        return cleaned_owner
+    cleaned_email = (user_email or "").strip().lower()
+    if cleaned_email and cleaned_email not in ("public / non connecté", "public", "anonymous", "anonyme"):
+        return f"user:{cleaned_email}"
+    return f"user:{ADMIN_EMAIL.lower()}"
+
 
 DEFAULT_OAUTH_CLIENT_ID = (
     "2500276981-gmjvvn9ucbagv4g44n7rsdq9qo688hpb.apps.googleusercontent.com"
@@ -100,6 +115,7 @@ class OAuthManager:
         self.firestore_backend = firestore_backend or FirestoreBackend(storage_dir)
         self._pending_states: dict[str, str] = {}
         self._sessions: dict[str, UserSession] = {}
+        self._revoked_sessions: set[str] = set()
         self._load_sessions()
 
     def get_client_credentials(self) -> tuple[str, str]:
@@ -256,7 +272,7 @@ class OAuthManager:
             return None
 
     def get_session(self, session_id: str | None) -> UserSession | None:
-        if not session_id:
+        if not session_id or session_id in self._revoked_sessions:
             return None
         if session_id in self._sessions:
             return self._sessions[session_id]
@@ -288,6 +304,7 @@ class OAuthManager:
     def delete_session(self, session_id: str | None) -> None:
         if not session_id:
             return
+        self._revoked_sessions.add(session_id)
         if session_id in self._sessions:
             del self._sessions[session_id]
             self._save_sessions()
@@ -296,6 +313,48 @@ class OAuthManager:
             self.firestore_backend.delete_document("akkord_sessions", doc_id)
         except Exception:
             pass
+
+    def encode_anon_cookie(self, anon_id: str) -> str:
+        """Encode and HMAC-sign an isolated anonymous browser session ID."""
+        cleaned = anon_id.strip()
+        sig = hmac.new(
+            self._signing_key(), f"anon:{cleaned}".encode("ascii"), hashlib.sha256
+        ).hexdigest()[:32]
+        return f"a1.{cleaned}.{sig}"
+
+    def decode_anon_cookie(self, token: str | None) -> str | None:
+        """Verify and decode an HMAC-signed anonymous browser session cookie."""
+        if not token or not token.startswith("a1."):
+            return None
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None
+        _, anon_id, sig = parts
+        if not anon_id or len(anon_id) < 8:
+            return None
+        expected_sig = hmac.new(
+            self._signing_key(), f"anon:{anon_id}".encode("ascii"), hashlib.sha256
+        ).hexdigest()[:32]
+        if not hmac.compare_digest(sig, expected_sig):
+            return None
+        return anon_id
+
+    def get_or_create_anon_id(self, token: str | None) -> tuple[str, str, bool]:
+        """Return (anon_id, signed_cookie_value, is_new) for an unauthenticated browser."""
+        existing = self.decode_anon_cookie(token)
+        if existing and token:
+            return existing, token, False
+        new_id = secrets.token_urlsafe(18)
+        signed = self.encode_anon_cookie(new_id)
+        return new_id, signed, True
+
+    @staticmethod
+    def resolve_owner_id(session: UserSession | None, anon_id: str) -> str:
+        """Resolve the caller's strict owner_id ('user:<email>' if authenticated, else 'anon:<anon_id>')."""
+        if session is not None and session.email.strip():
+            return f"user:{session.email.strip().lower()}"
+        return f"anon:{anon_id.strip()}"
+
 
     def _load_sessions(self) -> None:
         if not self.sessions_file.is_file():

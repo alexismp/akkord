@@ -47,6 +47,7 @@ from akkord.firestore_store import FirestoreBackend
 from akkord.job_queue import GCSStorageBackend, JobQueueManager
 from akkord.oauth import (
     ADMIN_EMAIL,
+    ANON_COOKIE_NAME,
     DEFAULT_OAUTH_REDIRECT_URI,
     OAuthManager,
     UserSession,
@@ -108,6 +109,50 @@ def _get_current_session(
     akkord_session: str | None = Cookie(default=None),
 ) -> UserSession | None:
     return oauth_manager.get_session(akkord_session)
+
+
+def _resolve_request_context(
+    request: Request, akkord_session: str | None = None
+) -> tuple[UserSession | None, str]:
+    """Return (UserSession | None, canonical_owner_id) for the current HTTP request."""
+    cookie_sess = akkord_session or request.cookies.get(SESSION_COOKIE_NAME)
+    session = oauth_manager.get_session(cookie_sess)
+    anon_id = getattr(request.state, "anon_id", None)
+    if not anon_id:
+        anon_id, _, _ = oauth_manager.get_or_create_anon_id(
+            request.cookies.get(ANON_COOKIE_NAME)
+        )
+    owner_id = oauth_manager.resolve_owner_id(session, anon_id)
+    return session, owner_id
+
+
+@app.middleware("http")
+async def attach_owner_and_anon_cookie(request: Request, call_next: Any) -> Response:
+    """Ensure every visitor has a signed, isolated anonymous session cookie and resolved owner_id."""
+    session = oauth_manager.get_session(request.cookies.get(SESSION_COOKIE_NAME))
+    anon_id, signed_anon_cookie, is_new_anon = oauth_manager.get_or_create_anon_id(
+        request.cookies.get(ANON_COOKIE_NAME)
+    )
+    request.state.user_session = session
+    request.state.anon_id = anon_id
+    request.state.owner_id = oauth_manager.resolve_owner_id(session, anon_id)
+    request.state.skip_anon_cookie = False
+
+    response: Response = await call_next(request)
+    if is_new_anon and not getattr(request.state, "skip_anon_cookie", False):
+        is_https = (
+            request.headers.get("x-forwarded-proto") == "https"
+            or request.url.scheme == "https"
+        )
+        response.set_cookie(
+            key=ANON_COOKIE_NAME,
+            value=signed_anon_cookie,
+            httponly=True,
+            secure=is_https,
+            samesite="lax",
+            max_age=60 * 60 * 24 * 30,
+        )
+    return response
 
 
 def _forbid_samples_access(folder_or_path: str) -> None:
@@ -267,6 +312,20 @@ def oauth_callback(
             url=f"/?oauth_error={str(exc)[:120]}", status_code=302
         )
 
+    # If this browser tab had an anonymous session with in-progress or recent jobs, claim them for the logged-in user
+    prior_anon_id = oauth_manager.decode_anon_cookie(
+        request.cookies.get(ANON_COOKIE_NAME)
+    ) or getattr(request.state, "anon_id", None)
+    if prior_anon_id:
+        try:
+            job_queue_manager.claim_anonymous_jobs(
+                f"anon:{prior_anon_id}",
+                user_session.email,
+                is_admin=user_session.is_admin,
+            )
+        except Exception:
+            pass
+
     target_url = "/"
     if user_session.is_admin:
         activity_manager.save_admin_oauth_tokens(
@@ -308,19 +367,39 @@ def oauth_callback(
 
 @app.post("/api/auth/logout")
 def oauth_logout(
+    request: Request,
     akkord_session: str | None = Cookie(default=None),
 ) -> JSONResponse:
     oauth_manager.delete_session(akkord_session)
+    _, fresh_signed_anon, _ = oauth_manager.get_or_create_anon_id(None)
+    request.state.skip_anon_cookie = True
+    is_https = (
+        request.headers.get("x-forwarded-proto") == "https"
+        or request.url.scheme == "https"
+    )
     resp = JSONResponse({"authenticated": False})
     resp.delete_cookie(SESSION_COOKIE_NAME)
+    resp.set_cookie(
+        key=ANON_COOKIE_NAME,
+        value=fresh_signed_anon,
+        httponly=True,
+        secure=is_https,
+        samesite="lax",
+        max_age=60 * 60 * 24 * 30,
+    )
     return resp
 
 
 @app.post("/api/cancel")
-def cancel_active_analysis(job_id: str | None = None) -> dict[str, Any]:
-    """Signal any running PDF analysis, async job, or batch stream to stop immediately."""
+def cancel_active_analysis(
+    request: Request,
+    job_id: str | None = None,
+    akkord_session: str | None = Cookie(default=None),
+) -> dict[str, Any]:
+    """Signal any running PDF analysis, async job, or batch stream owned by the caller to stop immediately."""
+    _, owner_id = _resolve_request_context(request, akkord_session)
     activity_manager.request_cancel()
-    cancelled_job = job_queue_manager.cancel_job(job_id=job_id)
+    cancelled_job = job_queue_manager.cancel_job(job_id=job_id, owner_id=owner_id)
     return {
         "cancelled": True,
         "job_id": cancelled_job.job_id if cancelled_job else None,
@@ -337,12 +416,13 @@ class ProcessTaskRequest(BaseModel):
 
 @app.post("/api/jobs/drive", status_code=202)
 def create_drive_batch_job(
+    request: Request,
     req: ProcessFolderRequest,
     akkord_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
     """Create a decoupled, event-driven batch job for a Google Drive folder (supports 10s or 100s of PDFs)."""
     _forbid_samples_access(req.folder)
-    session = oauth_manager.get_session(akkord_session)
+    session, owner_id = _resolve_request_context(request, akkord_session)
     oauth_creds = session.to_google_credentials() if session else None
     effective_model = _resolve_allowed_model(req.model, session)
 
@@ -399,12 +479,14 @@ def create_drive_batch_job(
         is_admin=is_admin,
         oauth_tokens=oauth_tokens,
         run_async=True,
+        owner_id=owner_id,
     )
     return job_queue_manager.serialize_job_for_client(job, is_admin=is_admin)
 
 
 @app.post("/api/jobs/upload", status_code=202)
 def create_upload_batch_job(
+    request: Request,
     files: list[UploadFile] = File(...),
     language: str = Form(DEFAULT_LANGUAGE),
     model: str = Form(DEFAULT_MODEL),
@@ -412,7 +494,7 @@ def create_upload_batch_job(
     akkord_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
     """Create a decoupled, event-driven batch job from uploaded PDF files."""
-    session = oauth_manager.get_session(akkord_session)
+    session, owner_id = _resolve_request_context(request, akkord_session)
     effective_model = _resolve_allowed_model(model, session)
     try:
         config = AkkordConfig(
@@ -458,25 +540,27 @@ def create_upload_batch_job(
         user_email=session.email if session else "",
         is_admin=is_admin,
         run_async=True,
+        owner_id=owner_id,
     )
     return job_queue_manager.serialize_job_for_client(job, is_admin=is_admin)
 
 
 @app.get("/api/jobs")
 def list_recent_jobs(
+    request: Request,
     akkord_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
-    """Return recent batch jobs and unified history items so the web UI can restore history on refresh."""
-    session = oauth_manager.get_session(akkord_session)
+    """Return recent batch jobs and unified history items strictly scoped to the caller's owner_id."""
+    session, owner_id = _resolve_request_context(request, akkord_session)
     is_admin = bool(session and session.is_admin)
-    jobs = job_queue_manager.list_jobs(limit=10)
+    jobs = job_queue_manager.list_jobs(limit=10, owner_id=owner_id)
     return {
         "jobs": [
             job_queue_manager.serialize_job_for_client(j, is_admin=is_admin)
             for j in jobs
         ],
         "history_items": job_queue_manager.get_recent_history(
-            limit=25, is_admin=is_admin
+            limit=25, is_admin=is_admin, owner_id=owner_id
         ),
         "daily_quota": activity_manager.get_quota_status(),
     }
@@ -485,34 +569,62 @@ def list_recent_jobs(
 @app.get("/api/jobs/{job_id}")
 def get_job_status(
     job_id: str,
+    request: Request,
     akkord_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
-    """Poll the live progress and per-file status of an asynchronous batch job."""
-    session = oauth_manager.get_session(akkord_session)
+    """Poll the live progress and per-file status of an asynchronous batch job (strictly owner-checked)."""
+    session, owner_id = _resolve_request_context(request, akkord_session)
     is_admin = bool(session and session.is_admin)
     job = job_queue_manager.get_job(job_id, reload_from_gcs=gcs_backend.enabled)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' introuvable.")
+    if not job_queue_manager.job_belongs_to_owner(job, owner_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Accès refusé : ce traitement est privé et appartient à un autre utilisateur.",
+        )
     return job_queue_manager.serialize_job_for_client(job, is_admin=is_admin)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
 def cancel_specific_job(
     job_id: str,
+    request: Request,
     akkord_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
-    """Cancel an asynchronous batch job and all its queued/deferred items."""
-    session = oauth_manager.get_session(akkord_session)
+    """Cancel an asynchronous batch job and all its queued/deferred items (strictly owner-checked)."""
+    session, owner_id = _resolve_request_context(request, akkord_session)
     is_admin = bool(session and session.is_admin)
-    job = job_queue_manager.cancel_job(job_id=job_id)
+    existing = job_queue_manager.get_job(job_id, reload_from_gcs=gcs_backend.enabled)
+    if existing is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' introuvable.")
+    if not job_queue_manager.job_belongs_to_owner(existing, owner_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Accès refusé : ce traitement est privé et appartient à un autre utilisateur.",
+        )
+    job = job_queue_manager.cancel_job(job_id=job_id, owner_id=owner_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"Job '{job_id}' introuvable.")
     return job_queue_manager.serialize_job_for_client(job, is_admin=is_admin)
 
 
 @app.get("/api/jobs/{job_id}/download-zip")
-def download_job_zip(job_id: str) -> Response:
-    """Download a ZIP archive containing all completed annotated PDFs for a batch job."""
+def download_job_zip(
+    job_id: str,
+    request: Request,
+    akkord_session: str | None = Cookie(default=None),
+) -> Response:
+    """Download a ZIP archive containing all completed annotated PDFs for a batch job (strictly owner-checked)."""
+    _, owner_id = _resolve_request_context(request, akkord_session)
+    job = job_queue_manager.get_job(job_id, reload_from_gcs=gcs_backend.enabled)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' introuvable.")
+    if not job_queue_manager.job_belongs_to_owner(job, owner_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Accès refusé : ce lot de partitions appartient à un autre utilisateur.",
+        )
     built = job_queue_manager.build_job_zip_bytes(job_id)
     if built is None:
         raise HTTPException(
@@ -677,6 +789,7 @@ def scan_folder(
 
 @app.post("/api/process")
 def process_folder(
+    request: Request,
     req: ProcessFolderRequest,
     akkord_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
@@ -687,7 +800,7 @@ def process_folder(
             detail=f"Limite quotidienne atteinte ({DAILY_FILE_LIMIT}/{DAILY_FILE_LIMIT} partitions PDF analysées aujourd'hui). Le quota sera réinitialisé demain.",
         )
     activity_manager.reset_cancel()
-    session = oauth_manager.get_session(akkord_session)
+    session, owner_id = _resolve_request_context(request, akkord_session)
     oauth_creds = session.to_google_credentials() if session else None
     effective_model = _resolve_allowed_model(req.model, session)
 
@@ -742,6 +855,7 @@ def process_folder(
                 rep_dict,
                 user_email=session.email if session else "",
                 source=sheet.source,
+                owner_id=owner_id,
             )
             reports.append(_sanitize_report_for_session(rep_dict, session))
         except Exception as exc:
@@ -755,6 +869,7 @@ def process_folder(
                 err_rep,
                 user_email=session.email if session else "",
                 source=sheet.source,
+                owner_id=owner_id,
             )
             reports.append(err_rep)
 
@@ -772,6 +887,7 @@ def process_folder(
 
 @app.post("/api/process-stream")
 def process_folder_stream(
+    request: Request,
     req: ProcessFolderRequest,
     akkord_session: str | None = Cookie(default=None),
 ) -> StreamingResponse:
@@ -783,7 +899,7 @@ def process_folder_stream(
             detail=f"Limite quotidienne atteinte ({DAILY_FILE_LIMIT}/{DAILY_FILE_LIMIT} partitions PDF analysées aujourd'hui). Le quota sera réinitialisé demain.",
         )
     activity_manager.reset_cancel()
-    session = oauth_manager.get_session(akkord_session)
+    session, owner_id = _resolve_request_context(request, akkord_session)
     oauth_creds = session.to_google_credentials() if session else None
     effective_model = _resolve_allowed_model(req.model, session)
 
@@ -1053,6 +1169,7 @@ def process_folder_stream(
                 rep_dict,
                 user_email=session.email if session else "",
                 source=sheet.source,
+                owner_id=owner_id,
             )
             client_rep = _sanitize_report_for_session(rep_dict, session)
             all_reports.append(client_rep)
@@ -1094,6 +1211,7 @@ def process_folder_stream(
 
 @app.post("/api/process-upload")
 async def process_uploaded_pdfs(
+    request: Request,
     files: list[UploadFile] = File(...),
     language: str = Form(DEFAULT_LANGUAGE),
     model: str = Form(DEFAULT_MODEL),
@@ -1107,7 +1225,7 @@ async def process_uploaded_pdfs(
             detail=f"Limite quotidienne atteinte ({DAILY_FILE_LIMIT}/{DAILY_FILE_LIMIT} partitions PDF analysées aujourd'hui). Le quota sera réinitialisé demain.",
         )
     activity_manager.reset_cancel()
-    session = oauth_manager.get_session(akkord_session)
+    session, owner_id = _resolve_request_context(request, akkord_session)
     effective_model = _resolve_allowed_model(model, session)
     try:
         config = AkkordConfig(
@@ -1149,6 +1267,7 @@ async def process_uploaded_pdfs(
                 rep_dict,
                 user_email=session.email if session else "",
                 source="upload",
+                owner_id=owner_id,
             )
             reports.append(_sanitize_report_for_session(rep_dict, session))
         except Exception as exc:
@@ -1162,6 +1281,7 @@ async def process_uploaded_pdfs(
                 err_rep,
                 user_email=session.email if session else "",
                 source="upload",
+                owner_id=owner_id,
             )
             reports.append(err_rep)
 
@@ -1184,6 +1304,7 @@ async def process_uploaded_pdfs(
 
 @app.post("/api/process-upload-stream")
 def process_uploaded_pdfs_stream(
+    request: Request,
     files: list[UploadFile] = File(...),
     language: str = Form(DEFAULT_LANGUAGE),
     model: str = Form(DEFAULT_MODEL),
@@ -1197,7 +1318,7 @@ def process_uploaded_pdfs_stream(
             detail=f"Limite quotidienne atteinte ({DAILY_FILE_LIMIT}/{DAILY_FILE_LIMIT} partitions PDF analysées aujourd'hui). Le quota sera réinitialisé demain.",
         )
     activity_manager.reset_cancel()
-    session = oauth_manager.get_session(akkord_session)
+    session, owner_id = _resolve_request_context(request, akkord_session)
     effective_model = _resolve_allowed_model(model, session)
     try:
         config = AkkordConfig(
@@ -1416,6 +1537,7 @@ def process_uploaded_pdfs_stream(
                 rep_dict,
                 user_email=session.email if session else "",
                 source="upload",
+                owner_id=owner_id,
             )
             client_rep = _sanitize_report_for_session(rep_dict, session)
             all_reports.append(client_rep)
@@ -1468,9 +1590,99 @@ def _build_content_disposition(disposition_type: str, filename: str) -> str:
         return f"{disposition_type}; filename*=utf-8''{utf8_filename}"
 
 
-@app.get("/api/originals/{filename}", response_model=None)
-def get_original_pdf(filename: str) -> Response:
+@app.get("/api/jobs/{job_id}/originals/{filename}", response_model=None)
+def get_job_original_pdf(
+    job_id: str,
+    filename: str,
+    request: Request,
+    akkord_session: str | None = Cookie(default=None),
+) -> Response:
+    """Serve the original PDF for a specific batch job (strictly owner-checked)."""
+    _, owner_id = _resolve_request_context(request, akkord_session)
+    job = job_queue_manager.get_job(job_id, reload_from_gcs=gcs_backend.enabled)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' introuvable.")
+    if not job_queue_manager.job_belongs_to_owner(job, owner_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Accès refusé : ce document est privé et appartient à un autre utilisateur.",
+        )
     safe_name = Path(filename).name
+    raw = job_queue_manager.read_original_pdf(safe_name, job_id=job_id)
+    if raw:
+        return Response(
+            content=raw,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": _build_content_disposition("inline", safe_name)
+            },
+        )
+    target = (UPLOADS_DIR / safe_name).resolve()
+    if target.is_file():
+        return FileResponse(
+            path=str(target),
+            media_type="application/pdf",
+            filename=safe_name,
+            content_disposition_type="inline",
+        )
+    raise HTTPException(
+        status_code=404, detail=f"Original file '{safe_name}' not found."
+    )
+
+
+@app.get("/api/jobs/{job_id}/outputs/{filename}", response_model=None)
+def get_job_output_pdf(
+    job_id: str,
+    filename: str,
+    request: Request,
+    akkord_session: str | None = Cookie(default=None),
+) -> Response:
+    """Serve the annotated output PDF for a specific batch job (strictly owner-checked)."""
+    _, owner_id = _resolve_request_context(request, akkord_session)
+    job = job_queue_manager.get_job(job_id, reload_from_gcs=gcs_backend.enabled)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' introuvable.")
+    if not job_queue_manager.job_belongs_to_owner(job, owner_id):
+        raise HTTPException(
+            status_code=403,
+            detail="Accès refusé : ce document est privé et appartient à un autre utilisateur.",
+        )
+    safe_name = Path(filename).name
+    raw = job_queue_manager.read_output_pdf(safe_name, job_id=job_id)
+    if raw:
+        return Response(
+            content=raw,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": _build_content_disposition("inline", safe_name)
+            },
+        )
+    target = (OUTPUTS_DIR / safe_name).resolve()
+    if target.is_file():
+        return FileResponse(
+            path=str(target),
+            media_type="application/pdf",
+            filename=safe_name,
+            content_disposition_type="inline",
+        )
+    raise HTTPException(status_code=404, detail=f"File '{safe_name}' not found.")
+
+
+@app.get("/api/originals/{filename}", response_model=None)
+def get_original_pdf(
+    filename: str,
+    request: Request,
+    akkord_session: str | None = Cookie(default=None),
+) -> Response:
+    _, owner_id = _resolve_request_context(request, akkord_session)
+    safe_name = Path(filename).name
+    if not job_queue_manager.user_owns_filename(
+        owner_id, safe_name, is_original=True
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Accès refusé : ce document est privé et appartient à un autre utilisateur.",
+        )
     target = (UPLOADS_DIR / safe_name).resolve()
     if target.is_file():
         return FileResponse(
@@ -1494,8 +1706,20 @@ def get_original_pdf(filename: str) -> Response:
 
 
 @app.get("/api/outputs/{filename}", response_model=None)
-def get_output_pdf(filename: str) -> Response:
+def get_output_pdf(
+    filename: str,
+    request: Request,
+    akkord_session: str | None = Cookie(default=None),
+) -> Response:
+    _, owner_id = _resolve_request_context(request, akkord_session)
     safe_name = Path(filename).name
+    if not job_queue_manager.user_owns_filename(
+        owner_id, safe_name, is_original=False
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Accès refusé : ce document est privé et appartient à un autre utilisateur.",
+        )
     target = (OUTPUTS_DIR / safe_name).resolve()
     if target.is_file():
         return FileResponse(

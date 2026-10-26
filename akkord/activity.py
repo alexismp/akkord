@@ -33,7 +33,12 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from akkord.firestore_store import FirestoreBackend
-from akkord.oauth import ADMIN_EMAIL, DEFAULT_OAUTH_CLIENT_ID, DEFAULT_OAUTH_CLIENT_SECRET
+from akkord.oauth import (
+    ADMIN_EMAIL,
+    DEFAULT_OAUTH_CLIENT_ID,
+    DEFAULT_OAUTH_CLIENT_SECRET,
+    normalize_record_owner_id,
+)
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
 DAILY_FILE_LIMIT = int(os.environ.get("AKKORD_DAILY_LIMIT", "25"))
@@ -72,6 +77,7 @@ class AnalyzedFileEntry:
     token_source: str = ""
     drive_file_id: str = ""
     drive_file_url: str = ""
+    owner_id: str = ""
 
 
 @dataclass
@@ -281,6 +287,9 @@ class ActivityManager:
                         else "14:02:12"
                     )
                     user_email = str(jdata.get("user_email") or ADMIN_EMAIL)
+                    job_owner_id = normalize_record_owner_id(
+                        str(jdata.get("owner_id") or ""), user_email
+                    )
                     model_name = str(jdata.get("model") or "gemini-4-argon")
                     lang = str(jdata.get("language") or "fr")
 
@@ -342,6 +351,7 @@ class ActivityManager:
                                 token_source=str(tok.get("token_source") or tok.get("source") or "api_metadata"),
                                 drive_file_id=d_id,
                                 drive_file_url=d_url,
+                                owner_id=job_owner_id,
                             )
                         )
                         added_any = True
@@ -471,6 +481,7 @@ class ActivityManager:
         rep_dict: dict[str, Any],
         user_email: str = "",
         source: str = "upload",
+        owner_id: str = "",
     ) -> None:
         """Record a completed PDF analysis toward the daily quota, token/cost tracker (Firestore), and 18:00 digest."""
         now = self.now_paris()
@@ -487,6 +498,8 @@ class ActivityManager:
             drive_file_url = str(uploaded_drive.get("webViewLink") or "")
             if not drive_file_url and drive_file_id:
                 drive_file_url = f"https://drive.google.com/file/d/{drive_file_id}/view"
+
+        effective_owner_id = normalize_record_owner_id(owner_id, user_email)
 
         entry = AnalyzedFileEntry(
             timestamp=now.strftime("%H:%M:%S"),
@@ -514,6 +527,7 @@ class ActivityManager:
             token_source=str(tok.get("source") or ""),
             drive_file_id=drive_file_id,
             drive_file_url=drive_file_url,
+            owner_id=effective_owner_id,
         )
 
         with self._lock:
@@ -535,6 +549,30 @@ class ActivityManager:
             self.firestore_backend.set_document("akkord_analysis_logs", log_id, entry_doc)
         except Exception:
             pass
+
+    def claim_anonymous_entries(self, anon_owner_id: str, user_email: str) -> int:
+        """Re-assign standalone daily activity entries created under an anonymous session to the newly authenticated user."""
+        cleaned_anon = (anon_owner_id or "").strip()
+        cleaned_email = (user_email or "").strip()
+        if not cleaned_anon or not cleaned_email:
+            return 0
+        target_owner = f"user:{cleaned_email.lower()}"
+        claimed = 0
+        with self._lock:
+            changed_days: list[str] = []
+            for day, rec in self._records.items():
+                day_changed = False
+                for e in rec.entries:
+                    if normalize_record_owner_id(e.owner_id, e.user_email) == cleaned_anon:
+                        e.owner_id = target_owner
+                        e.user_email = cleaned_email
+                        claimed += 1
+                        day_changed = True
+                if day_changed:
+                    changed_days.append(day)
+            for d in changed_days:
+                self._save(changed_day=d)
+        return claimed
 
     # --- Daily 18:00 Detailed Summary Email ---
     def build_daily_digest_content(self, date_str: str | None = None) -> tuple[str, str, str]:
@@ -903,7 +941,9 @@ class ActivityManager:
             for e in raw_entries:
                 if isinstance(e, dict):
                     clean_e = {k: v for k, v in e.items() if k in allowed_keys}
-                    entries.append(AnalyzedFileEntry(**clean_e))
+                    ent = AnalyzedFileEntry(**clean_e)
+                    ent.owner_id = normalize_record_owner_id(ent.owner_id, ent.user_email)
+                    entries.append(ent)
             raw_baseline = rdata.get("quota_reset_baseline")
             baseline = int(raw_baseline) if raw_baseline is not None else None
             return DailyActivityRecord(
@@ -978,6 +1018,7 @@ class ActivityManager:
                     estimated_cost_usd=0.0251,
                     estimated_cost_eur=0.023092,
                     token_source="api_metadata",
+                    owner_id=f"user:{ADMIN_EMAIL.lower()}",
                 )
             )
         with self._lock:
