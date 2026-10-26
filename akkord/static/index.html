@@ -29,29 +29,63 @@
             class="logo-img"
           >
           <div>
-            <span class="eyebrow">Music Harmony &amp; Counterpoint Studio</span>
+            <span class="eyebrow" data-i18n="header_eyebrow">Music Harmony &amp; Counterpoint Studio</span>
             <h1>akkord</h1>
           </div>
         </div>
-        <p class="subtitle">
+        <p class="subtitle" data-i18n-html="header_subtitle_html">
           Importez une partition PDF ou connectez un dossier Google Drive. Akkord vérifie ou génère la grille d'accords, propose des <strong>lignes de basse en contrepoint &amp; walking bass</strong>, et produit un PDF annoté en Français ou en Anglais.
         </p>
       </div>
 
       <div class="header-auth-box">
-        <span id="daily-quota-badge" class="pill-chip" title="Limite quotidienne de 25 partitions PDF par jour">
+        <div
+          id="ui-lang-switch"
+          class="lang-switcher"
+          role="group"
+          aria-label="Langue de l'interface / Interface language"
+          data-i18n-aria-label="ui_lang_switcher_aria"
+        >
+          <button
+            type="button"
+            id="ui-lang-fr-btn"
+            class="lang-switch-btn active"
+            data-lang="fr"
+            aria-pressed="true"
+            title="Français"
+          >
+            FR
+          </button>
+          <button
+            type="button"
+            id="ui-lang-en-btn"
+            class="lang-switch-btn"
+            data-lang="en"
+            aria-pressed="false"
+            title="English"
+          >
+            EN
+          </button>
+        </div>
+
+        <span
+          id="daily-quota-badge"
+          class="pill-chip"
+          title="Limite quotidienne de 25 partitions PDF par jour"
+          data-i18n-title="quota_badge_title"
+        >
           Quota : 0 / 25 PDF
         </span>
         <div id="auth-logged-out" class="auth-actions">
-          <a href="/auth/login" id="header-login-btn" class="btn btn-outline btn-sm">
+          <a href="/auth/login" id="header-login-btn" class="btn btn-outline btn-sm" data-i18n="header_login_btn">
             🔐 Connexion Google Drive
           </a>
         </div>
 
         <div id="auth-logged-in" class="auth-user-bar" hidden>
           <span id="auth-user-email" class="pill-chip"></span>
-          <span id="auth-admin-badge" class="pill-chip pill-admin" hidden>Administrateur</span>
-          <button type="button" id="logout-btn" class="btn btn-outline btn-sm">
+          <span id="auth-admin-badge" class="pill-chip pill-admin" hidden data-i18n="header_admin_badge">Administrateur</span>
+          <button type="button" id="logout-btn" class="btn btn-outline btn-sm" data-i18n="header_logout_btn">
             Déconnexion
           </button>
         </div>
@@ -63,21 +97,21 @@
     <div class="left-column">
       <!-- 1. Language (& Admin-only Model) Card -->
       <section class="card settings-card" aria-labelledby="settings-heading">
-        <h2 id="settings-heading">1. Langue du PDF annoté</h2>
+        <h2 id="settings-heading" data-i18n="card1_heading">1. Langue du PDF annoté</h2>
 
         <fieldset class="form-fieldset">
-          <legend class="sr-only">Langue du PDF annoté</legend>
-          <div class="radio-group" role="radiogroup" aria-label="Langue du PDF annoté">
+          <legend class="sr-only" data-i18n="card1_legend">Langue du PDF annoté</legend>
+          <div class="radio-group" role="radiogroup" aria-label="Langue du PDF annoté" data-i18n-aria-label="card1_legend">
             <label class="radio-card" for="lang-fr">
               <input type="radio" id="lang-fr" name="language" value="fr" checked>
-              <span class="radio-title">Français (FR)</span>
-              <span class="radio-desc">Grille d'accords, Solfège (Am / La m) &amp; propositions de basses (contrepoint / walking bass)</span>
+              <span class="radio-title" data-i18n="lang_fr_title">Français (FR)</span>
+              <span class="radio-desc" data-i18n="lang_fr_desc">Grille d'accords, Solfège (Am / La m) &amp; propositions de basses (contrepoint / walking bass)</span>
             </label>
 
             <label class="radio-card" for="lang-en">
               <input type="radio" id="lang-en" name="language" value="en">
-              <span class="radio-title">English (EN)</span>
-              <span class="radio-desc">Standard chord symbols (Am, Dm/F, G/B) &amp; counterpoint / walking-bass review</span>
+              <span class="radio-title" data-i18n="lang_en_title">English (EN)</span>
+              <span class="radio-desc" data-i18n="lang_en_desc">Standard chord symbols (Am, Dm/F, G/B) &amp; counterpoint / walking-bass review</span>
             </label>
           </div>
         </fieldset>
@@ -86,12 +120,15 @@
         <div id="admin-model-panel" class="admin-panel" hidden>
           <details class="advanced-details" id="admin-advanced-menu">
             <summary class="advanced-summary">
-              <span aria-hidden="true">⚙️</span> Menu avancé (Modèle, Suivi des tokens &amp; coûts, Actions)
+              <span aria-hidden="true">⚙️</span> <span data-i18n="admin_menu_summary">Menu avancé (Modèle, Suivi des tokens &amp; coûts, Actions)</span>
             </summary>
             <div class="details-body">
               <div class="form-group">
-                <label for="model-input">Modèle d'analyse harmonique <span class="req-badge">(Admin)</span></label>
-                <span id="model-hint" class="hint">
+                <label for="model-input">
+                  <span data-i18n="admin_model_label">Modèle d'analyse harmonique</span>
+                  <span class="req-badge" data-i18n="admin_badge_paren">(Admin)</span>
+                </label>
+                <span id="model-hint" class="hint" data-i18n-html="admin_model_hint_html">
                   Réservé à l'administrateur (<code>alexis.mp@gmail.com</code>).
                 </span>
                 <input
@@ -114,41 +151,41 @@
                 </datalist>
               </div>
               <div class="admin-usage-dashboard" id="admin-usage-dashboard">
-                <h3 class="admin-sub-heading" id="admin-usage-heading">Suivi des tokens &amp; Coûts estimés (Admin)</h3>
+                <h3 class="admin-sub-heading" id="admin-usage-heading" data-i18n="admin_usage_heading">Suivi des tokens &amp; Coûts estimés (Admin)</h3>
                 <div class="usage-kpi-grid">
                   <div class="usage-kpi-card">
-                    <span class="usage-kpi-label">Aujourd'hui (Tokens)</span>
+                    <span class="usage-kpi-label" data-i18n="admin_kpi_today_tokens">Aujourd'hui (Tokens)</span>
                     <strong id="usage-today-tokens" class="usage-kpi-value">0 tok</strong>
                     <span id="usage-today-breakdown" class="usage-kpi-sub">In: 0 • Out: 0 • Think: 0</span>
                   </div>
                   <div class="usage-kpi-card">
-                    <span class="usage-kpi-label">Aujourd'hui (Coût estimé)</span>
+                    <span class="usage-kpi-label" data-i18n="admin_kpi_today_cost">Aujourd'hui (Coût estimé)</span>
                     <strong id="usage-today-cost" class="usage-kpi-value">$0.0000 / 0.0000 €</strong>
                     <span id="usage-today-files" class="usage-kpi-sub">0 partition(s) aujourd'hui</span>
                   </div>
                   <div class="usage-kpi-card">
-                    <span class="usage-kpi-label">Cumul global (Tokens &amp; Coût)</span>
+                    <span class="usage-kpi-label" data-i18n="admin_kpi_cum_cost">Cumul global (Tokens &amp; Coût)</span>
                     <strong id="usage-cum-cost" class="usage-kpi-value">$0.0000 / 0.0000 €</strong>
                     <span id="usage-cum-tokens" class="usage-kpi-sub">0 tok au total</span>
                   </div>
                 </div>
                 <details class="usage-details-box" id="usage-details-box">
-                  <summary>Historique détaillé des partitions du jour (tokens &amp; coûts)</summary>
+                  <summary data-i18n="admin_usage_details_summary">Historique détaillé des partitions du jour (tokens &amp; coûts)</summary>
                   <div tabindex="0" role="region" aria-labelledby="admin-usage-table-caption" class="table-wrapper">
                     <table class="usage-table" id="admin-usage-table">
-                      <caption id="admin-usage-table-caption" class="sr-only">Détail de la consommation de tokens et des coûts par partition analysée aujourd'hui</caption>
+                      <caption id="admin-usage-table-caption" class="sr-only" data-i18n="admin_usage_table_caption">Détail de la consommation de tokens et des coûts par partition analysée aujourd'hui</caption>
                       <thead>
                         <tr>
-                          <th scope="col">Partition</th>
-                          <th scope="col">Heure &amp; Modèle</th>
-                          <th scope="col">Entrée / Sortie / Think</th>
-                          <th scope="col">Total Tokens</th>
-                          <th scope="col">Coût ($ / €)</th>
+                          <th scope="col" data-i18n="admin_th_sheet">Partition</th>
+                          <th scope="col" data-i18n="admin_th_time_model">Heure &amp; Modèle</th>
+                          <th scope="col" data-i18n="admin_th_in_out_think">Entrée / Sortie / Think</th>
+                          <th scope="col" data-i18n="admin_th_total_tokens">Total Tokens</th>
+                          <th scope="col" data-i18n="admin_th_cost">Coût ($ / €)</th>
                         </tr>
                       </thead>
                       <tbody id="admin-usage-tbody">
                         <tr>
-                          <th scope="row">Aucune analyse aujourd'hui</th>
+                          <th scope="row" data-i18n="admin_no_analysis_today">Aucune analyse aujourd'hui</th>
                           <td>—</td>
                           <td>0 / 0 / 0</td>
                           <td>0</td>
@@ -160,16 +197,16 @@
                 </details>
               </div>
               <div class="admin-digest-row">
-                <span class="hint">Récapitulatif quotidien automatique envoyé à 18h00 (si des PDFs ont été analysés).</span>
+                <span class="hint" data-i18n="admin_digest_hint">Récapitulatif quotidien automatique envoyé à 18h00 (si des PDFs ont été analysés).</span>
                 <div class="admin-action-buttons">
                   <button type="button" id="send-digest-btn" class="btn btn-outline btn-sm">
-                    <span aria-hidden="true">📧</span> Envoyer le récapitulatif du jour maintenant
+                    <span aria-hidden="true">📧</span> <span data-i18n="admin_btn_send_digest">Envoyer le récapitulatif du jour maintenant</span>
                   </button>
                   <button type="button" id="resume-deferred-btn" class="btn btn-outline btn-sm">
-                    <span aria-hidden="true">▶️</span> Relancer les partitions reportées (Quota J+1)
+                    <span aria-hidden="true">▶️</span> <span data-i18n="admin_btn_resume_deferred">Relancer les partitions reportées (Quota J+1)</span>
                   </button>
                   <button type="button" id="reset-quota-btn" class="btn btn-outline btn-sm">
-                    <span aria-hidden="true">🔄</span> Remettre à zéro le quota du jour (0 / 25)
+                    <span aria-hidden="true">🔄</span> <span data-i18n="admin_btn_reset_quota">Remettre à zéro le quota du jour (0 / 25)</span>
                   </button>
                 </div>
               </div>
@@ -180,11 +217,14 @@
 
       <!-- 2. Direct PDF Upload Card -->
       <section class="card upload-card" aria-labelledby="upload-heading">
-        <h2 id="upload-heading">2. Importer une partition PDF</h2>
+        <h2 id="upload-heading" data-i18n="card2_heading">2. Importer une partition PDF</h2>
         <form id="upload-form" action="/api/process-upload-stream" method="POST" enctype="multipart/form-data" novalidate>
           <div class="form-group">
-            <label for="pdf-file-input">Sélectionnez ou glissez-déposez un fichier PDF <span class="req-badge">(Requis)</span></label>
-            <span id="upload-hint" class="hint">
+            <label for="pdf-file-input">
+              <span data-i18n="upload_label">Sélectionnez ou glissez-déposez un fichier PDF</span>
+              <span class="req-badge" data-i18n="required_badge">(Requis)</span>
+            </label>
+            <span id="upload-hint" class="hint" data-i18n="upload_hint">
               Importez une ou plusieurs partitions PDF pour obtenir la version annotée avec accords, contrepoint et walking bass.
             </span>
             <div id="drop-zone" class="drop-zone">
@@ -201,16 +241,16 @@
               >
               <div class="drop-zone-content" aria-hidden="true">
                 <span class="drop-icon">📄</span>
-                <span id="selected-file-label" class="drop-title">Choisir un PDF ou glisser-déposer ici</span>
-                <span class="drop-sub">Partitions classiques, tablatures guitare et lead sheets (.pdf)</span>
+                <span id="selected-file-label" class="drop-title" data-i18n="upload_drop_title">Choisir un PDF ou glisser-déposer ici</span>
+                <span class="drop-sub" data-i18n="upload_drop_sub">Partitions classiques, tablatures guitare et lead sheets (.pdf)</span>
               </div>
             </div>
             <div id="upload-error" class="error-msg" role="alert">
-              <span aria-hidden="true">❌</span> Veuillez sélectionner au moins un fichier PDF.
+              <span aria-hidden="true">❌</span> <span data-i18n="upload_error_msg">Veuillez sélectionner au moins un fichier PDF.</span>
             </div>
           </div>
 
-          <button type="submit" id="upload-submit-btn" class="btn btn-primary">
+          <button type="submit" id="upload-submit-btn" class="btn btn-primary" data-i18n="upload_submit_btn">
             Annoter la partition PDF
           </button>
         </form>
@@ -219,28 +259,31 @@
       <!-- 3. Google Drive Folder Scanner Card -->
       <section class="card drive-card" aria-labelledby="drive-heading">
         <div class="card-header-row">
-          <h2 id="drive-heading">3. Scanner un dossier Google Drive</h2>
-          <span id="drive-oauth-badge" class="mode-badge mode-skip">Public</span>
+          <h2 id="drive-heading" data-i18n="card3_heading">3. Scanner un dossier Google Drive</h2>
+          <span id="drive-oauth-badge" class="mode-badge mode-skip" data-i18n="drive_badge_public">Public</span>
         </div>
 
         <div id="drive-oauth-callout" class="oauth-callout">
-          <p>
+          <p data-i18n-html="drive_oauth_callout_html">
             Pour analyser un <strong>dossier Google Drive privé</strong> (ou activer le mode administrateur), connectez votre compte Google.
           </p>
           <div class="oauth-callout-actions">
-            <a href="/auth/login" class="btn btn-outline btn-sm">🔐 Se connecter avec Google</a>
+            <a href="/auth/login" class="btn btn-outline btn-sm" data-i18n="drive_oauth_login_btn">🔐 Se connecter avec Google</a>
           </div>
         </div>
 
         <form id="drive-form" action="/api/process-stream" method="POST" novalidate>
           <div class="form-group">
             <div class="label-row">
-              <label for="folder-input">URL ou ID du dossier Google Drive <span class="req-badge">(Requis)</span></label>
+              <label for="folder-input">
+                <span data-i18n="drive_folder_label">URL ou ID du dossier Google Drive</span>
+                <span class="req-badge" data-i18n="required_badge">(Requis)</span>
+              </label>
               <button type="button" id="browse-drive-btn" class="btn btn-outline btn-sm">
-                <span aria-hidden="true">📁</span> Parcourir mon Google Drive…
+                <span aria-hidden="true">📁</span> <span data-i18n="drive_browse_btn">Parcourir mon Google Drive…</span>
               </button>
             </div>
-            <span id="folder-hint" class="hint">
+            <span id="folder-hint" class="hint" data-i18n-html="drive_folder_hint_html">
               Naviguez dans votre Google Drive ou collez l'URL d'un dossier (<code>https://drive.google.com/drive/folders/...</code>).
             </span>
             <input
@@ -257,27 +300,27 @@
               placeholder="https://drive.google.com/drive/folders/..."
             >
             <div id="folder-error" class="error-msg" role="alert">
-              <span aria-hidden="true">❌</span> Veuillez saisir ou sélectionner un dossier Google Drive.
+              <span aria-hidden="true">❌</span> <span data-i18n="drive_folder_error">Veuillez saisir ou sélectionner un dossier Google Drive.</span>
             </div>
           </div>
 
           <div class="checkbox-row">
             <input type="checkbox" id="upload-drive" name="upload_to_drive" checked>
-            <label for="upload-drive">Ré-envoyer les PDFs annotés dans le dossier Google Drive</label>
+            <label for="upload-drive" data-i18n="drive_reupload_label">Ré-envoyer les PDFs annotés dans le dossier Google Drive</label>
           </div>
 
           <div class="btn-row">
-            <button type="button" id="scan-btn" class="btn btn-outline">
+            <button type="button" id="scan-btn" class="btn btn-outline" data-i18n="drive_scan_btn">
               Scanner le dossier
             </button>
-            <button type="submit" id="drive-submit-btn" class="btn btn-primary">
+            <button type="submit" id="drive-submit-btn" class="btn btn-primary" data-i18n="drive_submit_btn">
               Analyser les PDFs du dossier
             </button>
           </div>
         </form>
 
         <div id="discovered-container" class="discovered-box" hidden>
-          <h3>PDFs détectés dans le dossier</h3>
+          <h3 data-i18n="drive_discovered_heading">PDFs détectés dans le dossier</h3>
           <ul id="discovered-list" class="file-list"></ul>
         </div>
       </section>
@@ -287,8 +330,8 @@
     <div class="right-column">
       <section class="card results-card" aria-labelledby="results-heading">
         <div class="results-header">
-          <h2 id="results-heading">Partitions annotées &amp; Analyse harmonique</h2>
-          <div id="status-banner" class="status-banner" role="status" aria-live="polite">
+          <h2 id="results-heading" data-i18n="results_heading">Partitions annotées &amp; Analyse harmonique</h2>
+          <div id="status-banner" class="status-banner" role="status" aria-live="polite" data-i18n="status_ready">
             Prêt — importez un PDF ou scannez un dossier Google Drive.
           </div>
         </div>
@@ -296,11 +339,11 @@
         <!-- Real-time Progress Panel -->
         <div id="progress-panel" class="progress-panel" hidden aria-live="polite">
           <div class="progress-top-row">
-            <span id="progress-file-label" class="progress-file-label">Traitement en cours…</span>
+            <span id="progress-file-label" class="progress-file-label" data-i18n="progress_processing">Traitement en cours…</span>
             <div class="progress-top-actions">
               <span id="progress-percent-label" class="progress-percent-label">0%</span>
               <button type="button" id="cancel-analysis-btn" class="btn btn-danger btn-sm">
-                <span aria-hidden="true">⏹</span> Interrompre l'analyse
+                <span aria-hidden="true">⏹</span> <span data-i18n="progress_cancel_btn">Interrompre l'analyse</span>
               </button>
             </div>
           </div>
@@ -314,12 +357,12 @@
           >
             <div id="progress-bar-fill" class="progress-bar-fill" style="width: 0%"></div>
           </div>
-          <p id="progress-step-message" class="progress-step-message">Initialisation…</p>
-          <ol class="progress-steps-list" aria-label="Étapes du traitement">
-            <li id="step-download" class="progress-step-item">1. Lecture PDF</li>
-            <li id="step-layout" class="progress-step-item">2. Détection des portées</li>
-            <li id="step-harmony" class="progress-step-item">3. Analyse harmonique</li>
-            <li id="step-annotate" class="progress-step-item">4. Annotation PDF</li>
+          <p id="progress-step-message" class="progress-step-message" data-i18n="progress_initializing">Initialisation…</p>
+          <ol class="progress-steps-list" aria-label="Étapes du traitement" data-i18n-aria-label="progress_steps_aria">
+            <li id="step-download" class="progress-step-item" data-i18n="step_1_download">1. Lecture PDF</li>
+            <li id="step-layout" class="progress-step-item" data-i18n="step_2_layout">2. Détection des portées</li>
+            <li id="step-harmony" class="progress-step-item" data-i18n="step_3_harmony">3. Analyse harmonique</li>
+            <li id="step-annotate" class="progress-step-item" data-i18n="step_4_annotate">4. Annotation PDF</li>
           </ol>
         </div>
 
@@ -327,32 +370,32 @@
         <div id="job-summary-bar" class="job-summary-bar" hidden aria-live="polite">
           <div class="job-summary-counters">
             <span class="job-counter-chip job-counter-done">
-              ✓ Terminées : <strong id="job-count-completed">0</strong>
+              ✓ <span data-i18n="job_counter_done">Terminées :</span> <strong id="job-count-completed">0</strong>
             </span>
             <span class="job-counter-chip job-counter-queued">
-              ⏳ En file aujourd'hui : <strong id="job-count-queued">0</strong>
+              ⏳ <span data-i18n="job_counter_queued">En file aujourd'hui :</span> <strong id="job-count-queued">0</strong>
             </span>
             <span id="job-counter-deferred-wrap" class="job-counter-chip job-counter-deferred" hidden>
-              📅 Reportées (quota 25/j) : <strong id="job-count-deferred">0</strong>
+              📅 <span data-i18n="job_counter_deferred">Reportées (quota 25/j) :</span> <strong id="job-count-deferred">0</strong>
             </span>
           </div>
           <div class="job-summary-actions">
             <button type="button" id="toggle-all-cards-btn" class="btn btn-outline btn-sm">
-              <span aria-hidden="true">↕</span> Tout replier
+              <span aria-hidden="true">↕</span> <span id="toggle-all-cards-label" data-i18n="btn_collapse_all">Tout replier</span>
             </button>
             <a id="job-download-zip-btn" class="btn btn-outline btn-sm" href="#" hidden>
-              <span aria-hidden="true">📦</span> Tout télécharger (.zip)
+              <span aria-hidden="true">📦</span> <span data-i18n="btn_download_zip">Tout télécharger (.zip)</span>
             </a>
           </div>
         </div>
 
         <div id="empty-state" class="empty-state">
           <div class="empty-illustration" aria-hidden="true">🎼</div>
-          <p>Vos partitions annotées s'afficheront ici au fur et à mesure de leur génération avec :</p>
+          <p data-i18n="empty_state_intro">Vos partitions annotées s'afficheront ici au fur et à mesure de leur génération avec :</p>
           <ul class="feature-bullets">
-            <li><strong>Mode Analyse :</strong> Revue des accords existants, précision (%) et corrections en place.</li>
-            <li><strong>Mode Ajout d'accords :</strong> Génération automatique des accords et diagrammes de manche 6 cordes.</li>
-            <li><strong>Contrepoint &amp; Walking Bass :</strong> Propositions de basses inversées évitant le doublage de la mélodie et l'usage systématique de la fondamentale.</li>
+            <li data-i18n-html="empty_bullet_1_html"><strong>Mode Analyse :</strong> Revue des accords existants, précision (%) et corrections en place.</li>
+            <li data-i18n-html="empty_bullet_2_html"><strong>Mode Ajout d'accords :</strong> Génération automatique des accords et diagrammes de manche 6 cordes.</li>
+            <li data-i18n-html="empty_bullet_3_html"><strong>Contrepoint &amp; Walking Bass :</strong> Propositions de basses inversées évitant le doublage de la mélodie et l'usage systématique de la fondamentale.</li>
           </ul>
         </div>
 
@@ -366,47 +409,48 @@
     <div class="drive-browser-inner">
       <div class="drive-browser-header">
         <div>
-          <h2 id="drive-browser-title">Sélectionner un dossier Google Drive</h2>
-          <p class="drive-browser-sub">Naviguez dans vos dossiers pour choisir où se trouvent vos partitions PDF.</p>
+          <h2 id="drive-browser-title" data-i18n="drive_modal_title">Sélectionner un dossier Google Drive</h2>
+          <p class="drive-browser-sub" data-i18n="drive_modal_sub">Naviguez dans vos dossiers pour choisir où se trouvent vos partitions PDF.</p>
         </div>
         <form method="dialog">
-          <button type="submit" class="btn btn-outline btn-sm" aria-label="Fermer l'explorateur Google Drive">✕</button>
+          <button type="submit" class="btn btn-outline btn-sm" aria-label="Fermer l'explorateur Google Drive" data-i18n-aria-label="drive_modal_close_aria">✕</button>
         </form>
       </div>
 
       <div class="drive-browser-toolbar">
-        <div class="drive-root-tabs" role="group" aria-label="Source Google Drive">
+        <div class="drive-root-tabs" role="group" aria-label="Source Google Drive" data-i18n-aria-label="drive_source_aria">
           <button type="button" id="drive-tab-root" class="btn btn-outline btn-sm active">
-            <span aria-hidden="true">🗂️</span> Mon Drive
+            <span aria-hidden="true">🗂️</span> <span data-i18n="drive_tab_my_drive">Mon Drive</span>
           </button>
           <button type="button" id="drive-tab-shared" class="btn btn-outline btn-sm">
-            <span aria-hidden="true">👥</span> Partagés avec moi
+            <span aria-hidden="true">👥</span> <span data-i18n="drive_tab_shared">Partagés avec moi</span>
           </button>
         </div>
 
         <search class="drive-search-box">
-          <label for="drive-folder-search" class="sr-only">Rechercher un dossier</label>
+          <label for="drive-folder-search" class="sr-only" data-i18n="drive_search_label">Rechercher un dossier</label>
           <input
             type="search"
             id="drive-folder-search"
             placeholder="Rechercher un dossier par nom…"
+            data-i18n-placeholder="drive_search_placeholder"
             autocorrect="off"
             spellcheck="false"
           >
-          <button type="button" id="drive-search-btn" class="btn btn-outline btn-sm">
+          <button type="button" id="drive-search-btn" class="btn btn-outline btn-sm" data-i18n="drive_search_btn">
             Rechercher
           </button>
         </search>
       </div>
 
-      <nav aria-label="Fil d'Ariane Google Drive" class="drive-breadcrumb-nav">
+      <nav aria-label="Fil d'Ariane Google Drive" data-i18n-aria-label="drive_breadcrumbs_aria" class="drive-breadcrumb-nav">
         <ol id="drive-breadcrumbs" class="drive-breadcrumbs"></ol>
       </nav>
 
       <div id="drive-browser-status" class="drive-browser-status" role="status" aria-live="polite" hidden></div>
 
       <div class="drive-browser-body">
-        <ul id="drive-folder-list" class="drive-folder-list" aria-label="Sous-dossiers"></ul>
+        <ul id="drive-folder-list" class="drive-folder-list" aria-label="Sous-dossiers" data-i18n-aria-label="drive_subfolders_aria"></ul>
         <div id="drive-pdf-preview" class="drive-pdf-preview" hidden>
           <strong id="drive-pdf-count-label"></strong>
           <ul id="drive-pdf-names" class="drive-pdf-names"></ul>
@@ -415,14 +459,14 @@
 
       <div class="drive-browser-footer">
         <div class="drive-selected-info">
-          <span class="drive-selected-label">Dossier courant :</span>
+          <span class="drive-selected-label" data-i18n="drive_current_folder_label">Dossier courant :</span>
           <strong id="drive-current-folder-name">Mon Drive</strong>
         </div>
         <div class="drive-browser-actions">
           <form method="dialog">
-            <button type="submit" class="btn btn-outline btn-sm">Annuler</button>
+            <button type="submit" class="btn btn-outline btn-sm" data-i18n="btn_cancel">Annuler</button>
           </form>
-          <button type="button" id="drive-select-current-btn" class="btn btn-primary btn-sm">
+          <button type="button" id="drive-select-current-btn" class="btn btn-primary btn-sm" data-i18n="drive_select_this_folder_btn">
             ✓ Choisir ce dossier
           </button>
         </div>
@@ -435,26 +479,26 @@
     <div class="pdf-preview-dialog-inner">
       <div class="pdf-preview-dialog-header">
         <div>
-          <h2 id="pdf-preview-dialog-title">Aperçu de la partition PDF</h2>
-          <p id="pdf-preview-dialog-sub" class="drive-browser-sub">Comparaison entre la partition originale et la partition annotée.</p>
+          <h2 id="pdf-preview-dialog-title" data-i18n="pdf_preview_title">Aperçu de la partition PDF</h2>
+          <p id="pdf-preview-dialog-sub" class="drive-browser-sub" data-i18n="pdf_preview_sub">Comparaison entre la partition originale et la partition annotée.</p>
         </div>
         <div class="pdf-preview-header-actions">
-          <a id="pdf-preview-download-btn" class="btn btn-primary btn-sm" href="#" download>
+          <a id="pdf-preview-download-btn" class="btn btn-primary btn-sm" href="#" download data-i18n="pdf_preview_download_btn">
             ⬇ Télécharger le PDF annoté
           </a>
           <form method="dialog">
-            <button type="submit" class="btn btn-outline btn-sm" aria-label="Fermer l'aperçu PDF">✕ Fermer</button>
+            <button type="submit" class="btn btn-outline btn-sm" aria-label="Fermer l'aperçu PDF" data-i18n-aria-label="pdf_preview_close_aria" data-i18n="pdf_preview_close_btn">✕ Fermer</button>
           </form>
         </div>
       </div>
       <div id="pdf-preview-grid" class="pdf-compare-grid two-col">
         <div id="pdf-preview-orig-pane" class="pdf-pane">
-          <span id="pdf-preview-orig-label" class="pdf-pane-label">Partition originale</span>
-          <iframe id="pdf-preview-orig-iframe" class="pdf-preview" src="about:blank" title="Aperçu PDF original"></iframe>
+          <span id="pdf-preview-orig-label" class="pdf-pane-label" data-i18n="pdf_preview_orig_label">Partition originale</span>
+          <iframe id="pdf-preview-orig-iframe" class="pdf-preview" src="about:blank" title="Aperçu PDF original" data-i18n-title="pdf_preview_orig_iframe_title"></iframe>
         </div>
         <div id="pdf-preview-annot-pane" class="pdf-pane">
-          <span id="pdf-preview-annot-label" class="pdf-pane-label">Partition annotée</span>
-          <iframe id="pdf-preview-annot-iframe" class="pdf-preview" src="about:blank" title="Aperçu PDF annoté"></iframe>
+          <span id="pdf-preview-annot-label" class="pdf-pane-label" data-i18n="pdf_preview_annot_label">Partition annotée</span>
+          <iframe id="pdf-preview-annot-iframe" class="pdf-preview" src="about:blank" title="Aperçu PDF annoté" data-i18n-title="pdf_preview_annot_iframe_title"></iframe>
         </div>
       </div>
     </div>
