@@ -220,7 +220,7 @@ def get_default_config(
     request: Request,
     akkord_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
-    session = oauth_manager.get_session(akkord_session)
+    session, owner_id = _resolve_request_context(request, akkord_session)
     if (
         session
         and session.is_admin
@@ -244,7 +244,7 @@ def get_default_config(
             {"code": "fr", "label": "Français (FR)"},
             {"code": "en", "label": "English (EN)"},
         ],
-        "daily_quota": activity_manager.get_quota_status(),
+        "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
         "admin_usage": activity_manager.get_usage_summary() if is_admin else None,
         "auth": {
             "authenticated": session is not None,
@@ -404,7 +404,7 @@ def cancel_active_analysis(
         "cancelled": True,
         "job_id": cancelled_job.job_id if cancelled_job else None,
         "message": "Interruption de l'analyse demandée.",
-        "daily_quota": activity_manager.get_quota_status(),
+        "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
     }
 
 
@@ -562,7 +562,7 @@ def list_recent_jobs(
         "history_items": job_queue_manager.get_recent_history(
             limit=25, is_admin=is_admin, owner_id=owner_id
         ),
-        "daily_quota": activity_manager.get_quota_status(),
+        "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
     }
 
 
@@ -673,16 +673,17 @@ def admin_reset_daily_quota(
     date: str | None = None,
     akkord_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
-    """Force-reset the daily 25-file quota to 0 (strictly admin only), persisted to Firestore, and auto-resume deferred jobs."""
+    """Force-reset the administrator's personal 25-file daily quota to 0 (without resetting the 200/day global cap), persisted to Firestore, and auto-resume deferred jobs."""
     session = oauth_manager.get_session(akkord_session)
     if not session or not session.is_admin:
         raise HTTPException(
             status_code=403,
             detail="Accès réservé à l'administrateur.",
         )
-    quota_status = activity_manager.reset_daily_quota(date)
-    resumed = job_queue_manager.resume_deferred_jobs()
-    current_quota = activity_manager.get_quota_status()
+    admin_owner_id = f"user:{session.email.lower()}"
+    quota_status = activity_manager.reset_daily_quota(date, owner_id=admin_owner_id)
+    resumed = job_queue_manager.resume_deferred_jobs(owner_id=admin_owner_id)
+    current_quota = activity_manager.get_quota_status(owner_id=admin_owner_id)
     current_quota["previous_used"] = quota_status.get("previous_used", 0)
     return {
         "reset": True,
@@ -705,12 +706,13 @@ def preview_daily_report(
             status_code=403,
             detail="Accès réservé à l'administrateur.",
         )
+    admin_owner_id = f"user:{session.email.lower()}"
     subject, text_body, html_body = activity_manager.build_daily_digest_content(date)
     return {
         "subject": subject,
         "text_body": text_body,
         "html_body": html_body,
-        "daily_quota": activity_manager.get_quota_status(),
+        "daily_quota": activity_manager.get_quota_status(owner_id=admin_owner_id),
     }
 
 
@@ -794,13 +796,14 @@ def process_folder(
     akkord_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
     _forbid_samples_access(req.folder)
-    if not activity_manager.can_process_more_today():
+    session, owner_id = _resolve_request_context(request, akkord_session)
+    if not activity_manager.can_process_more_today(owner_id=owner_id):
+        owner_lim = activity_manager.get_owner_daily_limit(owner_id)
         raise HTTPException(
             status_code=429,
-            detail=f"Limite quotidienne atteinte ({DAILY_FILE_LIMIT}/{DAILY_FILE_LIMIT} partitions PDF analysées aujourd'hui). Le quota sera réinitialisé demain.",
+            detail=f"Limite quotidienne atteinte ({owner_lim}/{owner_lim} partitions PDF analysées aujourd'hui). Le quota sera réinitialisé demain.",
         )
     activity_manager.reset_cancel()
-    session, owner_id = _resolve_request_context(request, akkord_session)
     oauth_creds = session.to_google_credentials() if session else None
     effective_model = _resolve_allowed_model(req.model, session)
 
@@ -839,7 +842,9 @@ def process_folder(
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     reports: list[dict[str, Any]] = []
     for sheet in sheets:
-        if activity_manager.is_cancelled() or not activity_manager.can_process_more_today():
+        if activity_manager.is_cancelled() or not activity_manager.can_process_more_today(
+            owner_id=owner_id
+        ):
             break
         try:
             report = pipeline.process_single_pdf(sheet)
@@ -880,7 +885,7 @@ def process_folder(
         "model": config.model,
         "processed_count": len(reports),
         "reports": reports,
-        "daily_quota": activity_manager.get_quota_status(),
+        "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
         "admin_usage": activity_manager.get_usage_summary() if is_admin else None,
     }
 
@@ -893,13 +898,14 @@ def process_folder_stream(
 ) -> StreamingResponse:
     """Stream NDJSON progress events and per-file reports while analyzing a folder."""
     _forbid_samples_access(req.folder)
-    if not activity_manager.can_process_more_today():
+    session, owner_id = _resolve_request_context(request, akkord_session)
+    if not activity_manager.can_process_more_today(owner_id=owner_id):
+        owner_lim = activity_manager.get_owner_daily_limit(owner_id)
         raise HTTPException(
             status_code=429,
-            detail=f"Limite quotidienne atteinte ({DAILY_FILE_LIMIT}/{DAILY_FILE_LIMIT} partitions PDF analysées aujourd'hui). Le quota sera réinitialisé demain.",
+            detail=f"Limite quotidienne atteinte ({owner_lim}/{owner_lim} partitions PDF analysées aujourd'hui). Le quota sera réinitialisé demain.",
         )
     activity_manager.reset_cancel()
-    session, owner_id = _resolve_request_context(request, akkord_session)
     oauth_creds = session.to_google_credentials() if session else None
     effective_model = _resolve_allowed_model(req.model, session)
 
@@ -955,18 +961,19 @@ def process_folder_stream(
                         "type": "cancelled",
                         "message": f"Analyse interrompue ({len(all_reports)} partition(s) traitée(s)).",
                         "processed_count": len(all_reports),
-                        "daily_quota": activity_manager.get_quota_status(),
+                        "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
                     }
                 ) + "\n"
                 return
 
-            if not activity_manager.can_process_more_today():
+            if not activity_manager.can_process_more_today(owner_id=owner_id):
+                owner_lim = activity_manager.get_owner_daily_limit(owner_id)
                 yield json.dumps(
                     {
                         "type": "quota_reached",
-                        "message": f"Limite quotidienne de {DAILY_FILE_LIMIT} partitions atteinte pour aujourd'hui.",
+                        "message": f"Limite quotidienne de {owner_lim} partitions atteinte pour aujourd'hui.",
                         "processed_count": len(all_reports),
-                        "daily_quota": activity_manager.get_quota_status(),
+                        "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
                     }
                 ) + "\n"
                 break
@@ -1025,7 +1032,7 @@ def process_folder_stream(
                             "type": "cancelled",
                             "message": f"Analyse interrompue ({len(all_reports)} partition(s) traitée(s)).",
                             "processed_count": len(all_reports),
-                            "daily_quota": activity_manager.get_quota_status(),
+                            "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
                         }
                     ) + "\n"
                     return
@@ -1054,7 +1061,7 @@ def process_folder_stream(
                             "type": "cancelled",
                             "message": f"Analyse interrompue ({len(all_reports)} partition(s) traitée(s)).",
                             "processed_count": len(all_reports),
-                            "daily_quota": activity_manager.get_quota_status(),
+                            "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
                         }
                     ) + "\n"
                     return
@@ -1182,7 +1189,7 @@ def process_folder_stream(
                     "filename": sheet.name,
                     "percent": round((file_num / total) * 100),
                     "report": client_rep,
-                    "daily_quota": activity_manager.get_quota_status(),
+                    "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
                     "admin_usage": activity_manager.get_usage_summary() if is_admin else None,
                 }
             ) + "\n"
@@ -1194,7 +1201,7 @@ def process_folder_stream(
                 "processed_count": len(all_reports),
                 "reports": all_reports,
                 "percent": 100,
-                "daily_quota": activity_manager.get_quota_status(),
+                "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
                 "admin_usage": activity_manager.get_usage_summary() if is_admin else None,
             }
         ) + "\n"
@@ -1219,13 +1226,14 @@ async def process_uploaded_pdfs(
     akkord_session: str | None = Cookie(default=None),
 ) -> dict[str, Any]:
     """Process one or more directly uploaded PDF music sheets and return annotated PDF URLs."""
-    if not activity_manager.can_process_more_today():
+    session, owner_id = _resolve_request_context(request, akkord_session)
+    if not activity_manager.can_process_more_today(owner_id=owner_id):
+        owner_lim = activity_manager.get_owner_daily_limit(owner_id)
         raise HTTPException(
             status_code=429,
-            detail=f"Limite quotidienne atteinte ({DAILY_FILE_LIMIT}/{DAILY_FILE_LIMIT} partitions PDF analysées aujourd'hui). Le quota sera réinitialisé demain.",
+            detail=f"Limite quotidienne atteinte ({owner_lim}/{owner_lim} partitions PDF analysées aujourd'hui). Le quota sera réinitialisé demain.",
         )
     activity_manager.reset_cancel()
-    session, owner_id = _resolve_request_context(request, akkord_session)
     effective_model = _resolve_allowed_model(model, session)
     try:
         config = AkkordConfig(
@@ -1242,7 +1250,9 @@ async def process_uploaded_pdfs(
 
     reports: list[dict[str, Any]] = []
     for up in files:
-        if activity_manager.is_cancelled() or not activity_manager.can_process_more_today():
+        if activity_manager.is_cancelled() or not activity_manager.can_process_more_today(
+            owner_id=owner_id
+        ):
             break
         fname = Path(up.filename or "sheet.pdf").name
         if not fname.lower().endswith(".pdf"):
@@ -1297,7 +1307,7 @@ async def process_uploaded_pdfs(
         "model": config.model,
         "processed_count": len(reports),
         "reports": reports,
-        "daily_quota": activity_manager.get_quota_status(),
+        "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
         "admin_usage": activity_manager.get_usage_summary() if is_admin else None,
     }
 
@@ -1312,13 +1322,14 @@ def process_uploaded_pdfs_stream(
     akkord_session: str | None = Cookie(default=None),
 ) -> StreamingResponse:
     """Stream real-time NDJSON progress events while processing uploaded PDF music sheets."""
-    if not activity_manager.can_process_more_today():
+    session, owner_id = _resolve_request_context(request, akkord_session)
+    if not activity_manager.can_process_more_today(owner_id=owner_id):
+        owner_lim = activity_manager.get_owner_daily_limit(owner_id)
         raise HTTPException(
             status_code=429,
-            detail=f"Limite quotidienne atteinte ({DAILY_FILE_LIMIT}/{DAILY_FILE_LIMIT} partitions PDF analysées aujourd'hui). Le quota sera réinitialisé demain.",
+            detail=f"Limite quotidienne atteinte ({owner_lim}/{owner_lim} partitions PDF analysées aujourd'hui). Le quota sera réinitialisé demain.",
         )
     activity_manager.reset_cancel()
-    session, owner_id = _resolve_request_context(request, akkord_session)
     effective_model = _resolve_allowed_model(model, session)
     try:
         config = AkkordConfig(
@@ -1371,18 +1382,19 @@ def process_uploaded_pdfs_stream(
                         "type": "cancelled",
                         "message": f"Analyse interrompue ({len(all_reports)} partition(s) traitée(s)).",
                         "processed_count": len(all_reports),
-                        "daily_quota": activity_manager.get_quota_status(),
+                        "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
                     }
                 ) + "\n"
                 return
 
-            if not activity_manager.can_process_more_today():
+            if not activity_manager.can_process_more_today(owner_id=owner_id):
+                owner_lim = activity_manager.get_owner_daily_limit(owner_id)
                 yield json.dumps(
                     {
                         "type": "quota_reached",
-                        "message": f"Limite quotidienne de {DAILY_FILE_LIMIT} partitions atteinte pour aujourd'hui.",
+                        "message": f"Limite quotidienne de {owner_lim} partitions atteinte pour aujourd'hui.",
                         "processed_count": len(all_reports),
-                        "daily_quota": activity_manager.get_quota_status(),
+                        "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
                     }
                 ) + "\n"
                 break
@@ -1434,7 +1446,7 @@ def process_uploaded_pdfs_stream(
                             "type": "cancelled",
                             "message": f"Analyse interrompue ({len(all_reports)} partition(s) traitée(s)).",
                             "processed_count": len(all_reports),
-                            "daily_quota": activity_manager.get_quota_status(),
+                            "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
                         }
                     ) + "\n"
                     return
@@ -1550,7 +1562,7 @@ def process_uploaded_pdfs_stream(
                     "filename": sheet.name,
                     "percent": round((file_num / total) * 100),
                     "report": client_rep,
-                    "daily_quota": activity_manager.get_quota_status(),
+                    "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
                     "admin_usage": activity_manager.get_usage_summary() if is_admin else None,
                 }
             ) + "\n"
@@ -1562,7 +1574,7 @@ def process_uploaded_pdfs_stream(
                 "processed_count": len(all_reports),
                 "reports": all_reports,
                 "percent": 100,
-                "daily_quota": activity_manager.get_quota_status(),
+                "daily_quota": activity_manager.get_quota_status(owner_id=owner_id),
                 "admin_usage": activity_manager.get_usage_summary() if is_admin else None,
             }
         ) + "\n"

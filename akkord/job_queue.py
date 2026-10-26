@@ -36,7 +36,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from akkord.activity import DAILY_FILE_LIMIT, ActivityManager
+from akkord.activity import DAILY_FILE_LIMIT, GLOBAL_DAILY_FILE_LIMIT, ActivityManager
 from akkord.config import AkkordConfig
 from akkord.drive import DriveConnector, SheetFile
 from akkord.harmony import HarmonyAnalysisResult, compute_harmony_accuracy_score
@@ -376,6 +376,9 @@ class JobQueueManager:
         else:
             job.percent = 100
 
+        owner_limit = self.activity_manager.get_owner_daily_limit(
+            normalize_record_owner_id(job.owner_id, job.user_email)
+        )
         if cancelled > 0 and queued_today == 0 and deferred == 0:
             job.status = "cancelled"
             job.message = (
@@ -388,7 +391,7 @@ class JobQueueManager:
             next_date_label = next_dates[0] if next_dates else "demain"
             job.message = (
                 f"✅ Lot du jour terminé ({completed} partition(s) traitée(s)). "
-                f"📅 {deferred} partition(s) supplémentaire(s) planifiée(s) automatiquement à partir du {next_date_label} (limite de {DAILY_FILE_LIMIT}/jour)."
+                f"📅 {deferred} partition(s) supplémentaire(s) planifiée(s) automatiquement à partir du {next_date_label} (limite de {owner_limit}/jour)."
             )
         elif queued_today == 0 and deferred == 0:
             job.status = "completed"
@@ -403,7 +406,7 @@ class JobQueueManager:
             if deferred > 0:
                 job.message = (
                     f"Traitement en cours ({completed}/{total - deferred} aujourd'hui) • "
-                    f"📅 {deferred} partition(s) planifiée(s) pour demain (quota {DAILY_FILE_LIMIT}/j)."
+                    f"📅 {deferred} partition(s) planifiée(s) pour demain (quota {owner_limit}/j)."
                 )
             else:
                 job.message = (
@@ -597,15 +600,21 @@ class JobQueueManager:
                     rep.pop("token_usage", None)
                     if isinstance(detail, dict):
                         detail.pop("token_usage", None)
-        data["daily_quota"] = self.activity_manager.get_quota_status()
+        effective_owner = normalize_record_owner_id(job.owner_id, job.user_email)
+        data["daily_quota"] = self.activity_manager.get_quota_status(
+            owner_id=effective_owner
+        )
         data["admin_usage"] = (
             self.activity_manager.get_usage_summary() if is_admin else None
         )
         return data
 
-    def _compute_schedule_for_excess_item(self, excess_index_zero_based: int) -> datetime:
-        """Compute the Paris timestamp (00:05 on Day + K) for items exceeding today's 25-file quota."""
-        days_ahead = (excess_index_zero_based // DAILY_FILE_LIMIT) + 1
+    def _compute_schedule_for_excess_item(
+        self, excess_index_zero_based: int, daily_limit: int = DAILY_FILE_LIMIT
+    ) -> datetime:
+        """Compute the Paris timestamp (00:05 on Day + K) for items exceeding today's daily quota."""
+        step_limit = max(1, daily_limit)
+        days_ahead = (excess_index_zero_based // step_limit) + 1
         now = self._now_paris()
         target_date = (now + timedelta(days=days_ahead)).date()
         return datetime(
@@ -637,18 +646,28 @@ class JobQueueManager:
         job_id = f"job-{now.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(3)}"
         effective_owner_id = normalize_record_owner_id(owner_id, user_email)
 
-        quota = self.activity_manager.get_quota_status()
-        remaining_today = int(quota.get("remaining", DAILY_FILE_LIMIT))
+        quota = self.activity_manager.get_quota_status(owner_id=effective_owner_id)
+        owner_limit = int(quota.get("limit", DAILY_FILE_LIMIT))
+        owner_remaining = int(quota.get("owner_remaining", owner_limit))
+        global_remaining = int(quota.get("global_remaining", GLOBAL_DAILY_FILE_LIMIT))
 
-        # Also count items already queued/processing today in other active jobs
+        # Also count items already queued/processing today in active jobs (per owner and globally)
         with self._lock:
-            already_queued_in_active_jobs = sum(
+            owner_queued_active = sum(
+                it.status in ("queued", "processing")
+                for j in self._jobs.values()
+                if j.status == "running" and self.job_belongs_to_owner(j, effective_owner_id)
+                for it in j.items
+            )
+            global_queued_active = sum(
                 it.status in ("queued", "processing")
                 for j in self._jobs.values()
                 if j.status == "running"
                 for it in j.items
             )
-        available_slots_today = max(0, remaining_today - already_queued_in_active_jobs)
+        avail_owner = max(0, owner_remaining - owner_queued_active)
+        avail_global = max(0, global_remaining - global_queued_active)
+        available_slots_today = min(avail_owner, avail_global)
 
         items: list[JobItem] = []
         for idx, sh in enumerate(sheets, start=1):
@@ -673,7 +692,9 @@ class JobQueueManager:
             else:
                 status = "deferred_next_day"
                 excess_offset = (idx - 1) - available_slots_today
-                sched_dt = self._compute_schedule_for_excess_item(excess_offset)
+                sched_dt = self._compute_schedule_for_excess_item(
+                    excess_offset, daily_limit=owner_limit
+                )
                 scheduled_for = sched_dt.isoformat(timespec="minutes")
 
             items.append(
@@ -692,7 +713,7 @@ class JobQueueManager:
                     stage_message=(
                         "En file d'attente pour analyse aujourd'hui…"
                         if status == "queued"
-                        else f"Reporté automatiquement au {scheduled_for[:10]} (quota de {DAILY_FILE_LIMIT} fichiers/jour)"
+                        else f"Reporté automatiquement au {scheduled_for[:10]} (quota de {owner_limit} fichiers/jour)"
                     ),
                     original_url=f"/api/jobs/{job_id}/originals/{quote(safe_name)}",
                 )
@@ -853,15 +874,19 @@ class JobQueueManager:
         if not force and was_already_completed:
             return {"processed": True, "reason": "already_completed"}
 
-        # Check daily 25-file quota right before processing (unless force re-processing)
-        if not force and not self.activity_manager.can_process_more_today():
-            sched_dt = self._compute_schedule_for_excess_item(0)
+        effective_owner_id = normalize_record_owner_id(job.owner_id, job.user_email)
+        owner_limit = self.activity_manager.get_owner_daily_limit(effective_owner_id)
+        # Check daily per-owner & global quota right before processing (unless force re-processing)
+        if not force and not self.activity_manager.can_process_more_today(
+            owner_id=effective_owner_id
+        ):
+            sched_dt = self._compute_schedule_for_excess_item(0, daily_limit=owner_limit)
             item.status = "deferred_next_day"
             item.scheduled_for = sched_dt.isoformat(timespec="minutes")
             item.stage = "deferred"
             item.stage_message = (
                 f"Reporté automatiquement au {item.scheduled_for[:10]} "
-                f"(quota quotidien de {DAILY_FILE_LIMIT} fichiers atteint)."
+                f"(quota quotidien de {owner_limit} fichiers atteint)."
             )
             self._save_job(job)
             return {"processed": False, "reason": "deferred_next_day", "scheduled_for": item.scheduled_for}
@@ -1055,12 +1080,16 @@ class JobQueueManager:
     def claim_anonymous_jobs(
         self, anon_owner_id: str, user_email: str, is_admin: bool = False
     ) -> int:
-        """Transfer ownership of any jobs created under `anon_owner_id` in this browser tab to the newly logged-in Google user."""
+        """Transfer ownership of any jobs and activity entries created under `anon_owner_id` to the newly logged-in Google user (deducting from their 25/day quota)."""
         cleaned_anon = (anon_owner_id or "").strip()
         cleaned_email = (user_email or "").strip()
         if not cleaned_anon or not cleaned_email:
             return 0
         target_owner = f"user:{cleaned_email.lower()}"
+        try:
+            self.activity_manager.claim_anonymous_entries(cleaned_anon, cleaned_email)
+        except Exception:
+            pass
         claimed_count = 0
         with self._lock:
             for job in list(self._jobs.values()):
@@ -1070,26 +1099,32 @@ class JobQueueManager:
                     job.is_admin = is_admin
                     self._save_job(job)
                     claimed_count += 1
-        try:
-            self.activity_manager.claim_anonymous_entries(cleaned_anon, cleaned_email)
-        except Exception:
-            pass
+        if claimed_count > 0:
+            try:
+                self.resume_deferred_jobs(owner_id=target_owner)
+            except Exception:
+                pass
         return claimed_count
 
-    def resume_deferred_jobs(self, process_immediately_if_local: bool = False) -> dict[str, Any]:
-        """Promote up to today's remaining quota (25 files/day) of `deferred_next_day` items to `queued` and dispatch them."""
+    def resume_deferred_jobs(
+        self,
+        process_immediately_if_local: bool = False,
+        owner_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Promote up to each owner's remaining daily quota (respecting the 200/day global cap) of `deferred_next_day` items to `queued` and dispatch them."""
         self.activity_manager.reset_cancel()
-        quota = self.activity_manager.get_quota_status()
-        remaining = int(quota.get("remaining", 0))
-        if remaining <= 0:
+        initial_quota = self.activity_manager.get_quota_status(owner_id=owner_id)
+        global_rem = int(initial_quota.get("global_remaining", GLOBAL_DAILY_FILE_LIMIT))
+        if global_rem <= 0 or (owner_id and int(initial_quota.get("remaining", 0)) <= 0):
             return {
                 "resumed_count": 0,
-                "remaining_quota": 0,
+                "remaining_quota": int(initial_quota.get("remaining", 0)),
                 "reason": "Quota quotidien déjà atteint pour aujourd'hui.",
             }
 
         resumed_items: list[tuple[str, str]] = []
         affected_jobs: list[BatchJob] = []
+        owner_rem_cache: dict[str, int] = {}
 
         with self._lock:
             # Reload jobs from GCS if enabled
@@ -1098,20 +1133,30 @@ class JobQueueManager:
 
             jobs_chronological = sorted(self._jobs.values(), key=lambda j: j.created_at)
             for job in jobs_chronological:
-                if remaining <= 0:
+                if global_rem <= 0:
                     break
                 if job.status == "cancelled":
                     continue
+                job_owner = normalize_record_owner_id(job.owner_id, job.user_email)
+                if owner_id and job_owner != owner_id:
+                    continue
+                if job_owner not in owner_rem_cache:
+                    q_owner = self.activity_manager.get_quota_status(owner_id=job_owner)
+                    owner_rem_cache[job_owner] = int(q_owner.get("remaining", 0))
+                if owner_rem_cache[job_owner] <= 0:
+                    continue
+
                 job_modified = False
                 for it in job.items:
-                    if remaining <= 0:
+                    if global_rem <= 0 or owner_rem_cache[job_owner] <= 0:
                         break
                     if it.status == "deferred_next_day":
                         it.status = "queued"
                         it.stage = "download"
                         it.stage_message = "Reprise automatique du quota quotidien…"
                         resumed_items.append((job.job_id, it.item_id))
-                        remaining -= 1
+                        owner_rem_cache[job_owner] -= 1
+                        global_rem -= 1
                         job_modified = True
                 if job_modified:
                     self._save_job(job)
@@ -1130,7 +1175,9 @@ class JobQueueManager:
 
         return {
             "resumed_count": len(resumed_items),
-            "remaining_quota": self.activity_manager.get_quota_status().get("remaining", 0),
+            "remaining_quota": self.activity_manager.get_quota_status(owner_id=owner_id).get(
+                "remaining", 0
+            ),
             "jobs_updated": [j.job_id for j in affected_jobs],
         }
 

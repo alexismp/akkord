@@ -21,7 +21,7 @@
       header_subtitle_html:
         "Importez une partition PDF ou connectez un dossier Google Drive. Akkord vérifie ou génère la grille d'accords, propose des <strong>lignes de basse en contrepoint &amp; walking bass</strong>, et produit un PDF annoté en Français ou en Anglais.",
       ui_lang_switcher_aria: "Langue de l'interface",
-      quota_badge_title: "Limite quotidienne de 25 partitions PDF par jour",
+      quota_badge_title: "Limite quotidienne : {limit} PDF/jour par utilisateur (plafond global : 200/j)",
       quota_badge_text: "Quota : {used} / {limit} PDF",
       header_login_btn: "🔐 Connexion Google Drive",
       header_admin_badge: "Administrateur",
@@ -256,7 +256,7 @@
       header_subtitle_html:
         "Upload a PDF sheet music score or connect a Google Drive folder. Akkord verifies or generates the chord chart, proposes <strong>counterpoint &amp; walking bass lines</strong>, and produces an annotated PDF in French or English.",
       ui_lang_switcher_aria: "Interface language",
-      quota_badge_title: "Daily limit of 25 PDF scores per day",
+      quota_badge_title: "Daily limit: {limit} PDF scores/day per user (global cap: 200/day)",
       quota_badge_text: "Quota: {used} / {limit} PDF",
       header_login_btn: "🔐 Sign in with Google Drive",
       header_admin_badge: "Administrator",
@@ -720,8 +720,9 @@
     }
     if (!dailyQuotaBadge) return;
     const used = (lastQuotaState && lastQuotaState.used) || 0;
-    const limit = (lastQuotaState && lastQuotaState.limit) || 25;
+    const limit = (lastQuotaState && lastQuotaState.limit) || (currentAuth.authenticated ? 25 : 5);
     dailyQuotaBadge.textContent = t("quota_badge_text", { used, limit });
+    dailyQuotaBadge.title = t("quota_badge_title", { limit });
   }
 
   function updateAdminUsageUI(usage) {

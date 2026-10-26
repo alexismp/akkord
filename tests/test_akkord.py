@@ -1933,6 +1933,152 @@ def test_strict_user_and_anonymous_privacy_isolation(
     assert other_client.get(f"/api/jobs/{anon_job_id}").status_code == 200
 
 
+def test_per_user_anonymous_and_global_200_quota_enforcement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify 5 PDF/day anonymous quota, 25 PDF/day per-user quota, OAuth login deduction, admin-only personal reset, and 200 PDF/day global ceiling."""
+    from akkord.activity import (
+        ANON_DAILY_FILE_LIMIT,
+        DAILY_FILE_LIMIT,
+        GLOBAL_DAILY_FILE_LIMIT,
+        ActivityManager,
+    )
+    from akkord.job_queue import GCSStorageBackend, JobQueueManager
+    from akkord.oauth import UserSession
+    import akkord.server as srv
+
+    assert ANON_DAILY_FILE_LIMIT == 5
+    assert DAILY_FILE_LIMIT == 25
+    assert GLOBAL_DAILY_FILE_LIMIT == 200
+
+    store_dir = tmp_path / "quota_isolation_store"
+    act_mgr = ActivityManager(store_dir)
+    gcs_mgr = GCSStorageBackend(store_dir)
+    q_mgr = JobQueueManager(store_dir, act_mgr, gcs_mgr)
+    monkeypatch.setattr(srv, "activity_manager", act_mgr)
+    monkeypatch.setattr(srv, "job_queue_manager", q_mgr)
+
+    anon_owner = "anon:visitor_1"
+    user_alice = "user:alice@example.com"
+    user_bob = "user:bob@example.com"
+    user_admin = "user:alexis.mp@gmail.com"
+
+    # 1. Anonymous visitor starts with 5/day limit
+    q_anon_0 = act_mgr.get_quota_status(owner_id=anon_owner)
+    assert q_anon_0["limit"] == 5
+    assert q_anon_0["used"] == 0
+    assert q_anon_0["remaining"] == 5
+    assert q_anon_0["global_limit"] == 200
+
+    # Record 5 analyses for anonymous visitor -> hits 5/day cap
+    for i in range(5):
+        act_mgr.record_analysis(
+            {
+                "source_name": f"anon-{i + 1}.pdf",
+                "output_filename": f"anon-{i + 1}-avec-accords.pdf",
+                "mode": "add_chords",
+                "title": f"Anon {i + 1}",
+                "detected_key": "C",
+                "accuracy_score": 100,
+                "annotations_count": 4,
+            },
+            user_email="",
+            source="upload",
+            owner_id=anon_owner,
+        )
+
+    q_anon_5 = act_mgr.get_quota_status(owner_id=anon_owner)
+    assert q_anon_5["used"] == 5
+    assert q_anon_5["remaining"] == 0
+    assert act_mgr.can_process_more_today(owner_id=anon_owner) is False
+
+    # Other users still have their full 25/day quota
+    q_bob_0 = act_mgr.get_quota_status(owner_id=user_bob)
+    assert q_bob_0["limit"] == 25
+    assert q_bob_0["used"] == 0
+    assert q_bob_0["remaining"] == 25
+    assert q_bob_0["global_used"] == 5
+    assert q_bob_0["global_remaining"] == 195
+
+    # 2. Anonymous visitor signs in as Alice -> 5 PDFs are attached to Alice and deducted from her 25/day quota (20 remaining)
+    act_mgr.claim_anonymous_entries(anon_owner, "alice@example.com")
+    q_alice = act_mgr.get_quota_status(owner_id=user_alice)
+    assert q_alice["limit"] == 25
+    assert q_alice["used"] == 5
+    assert q_alice["remaining"] == 20
+    assert act_mgr.can_process_more_today(owner_id=user_alice) is True
+
+    # 3. Admin records 10 PDFs, then resets quota via /api/admin/reset-quota -> resets ONLY Admin's personal quota (0/25), NOT Alice's or global_used
+    for i in range(10):
+        act_mgr.record_analysis(
+            {
+                "source_name": f"admin-{i + 1}.pdf",
+                "output_filename": f"admin-{i + 1}-avec-accords.pdf",
+                "mode": "analyze",
+                "title": f"Admin {i + 1}",
+                "detected_key": "Am",
+                "accuracy_score": 90,
+                "annotations_count": 6,
+            },
+            user_email="alexis.mp@gmail.com",
+            source="drive",
+            owner_id=user_admin,
+        )
+
+    assert act_mgr.get_quota_status(owner_id=user_admin)["used"] == 10
+    assert act_mgr.get_quota_status(owner_id=user_admin)["global_used"] == 15
+
+    admin_cookie = srv.oauth_manager.encode_session_cookie(
+        UserSession(
+            session_id="adm-quota-sess",
+            email="alexis.mp@gmail.com",
+            name="Alexis",
+            picture="",
+            access_token="tok",
+            refresh_token="ref",
+        )
+    )
+    client = TestClient(app)
+    client.cookies.set("akkord_session", admin_cookie)
+    r_reset = client.post("/api/admin/reset-quota")
+    assert r_reset.status_code == 200
+    reset_data = r_reset.json()["daily_quota"]
+    assert reset_data["used"] == 0
+    assert reset_data["remaining"] == 25
+    assert reset_data["previous_used"] == 10
+    # Global counter (15/200) and Alice's counter (5/25) are untouched!
+    assert reset_data["global_used"] == 15
+    assert reset_data["global_remaining"] == 185
+    assert act_mgr.get_quota_status(owner_id=user_alice)["used"] == 5
+    assert act_mgr.get_quota_status(owner_id=user_alice)["remaining"] == 20
+
+    # 4. Global 200 PDF/day cap blocks everyone once 200 total PDFs have been processed today
+    for i in range(185):
+        act_mgr.record_analysis(
+            {
+                "source_name": f"bulk-{i + 1}.pdf",
+                "output_filename": f"bulk-{i + 1}-avec-accords.pdf",
+                "mode": "add_chords",
+                "title": f"Bulk {i + 1}",
+                "detected_key": "G",
+                "accuracy_score": 100,
+                "annotations_count": 4,
+            },
+            user_email=f"user{i // 20}@example.com",
+            source="upload",
+            owner_id=f"user:user{i // 20}@example.com",
+        )
+
+    q_bob_at_cap = act_mgr.get_quota_status(owner_id=user_bob)
+    assert q_bob_at_cap["used"] == 0
+    assert q_bob_at_cap["owner_remaining"] == 25
+    assert q_bob_at_cap["global_used"] == 200
+    assert q_bob_at_cap["global_remaining"] == 0
+    assert q_bob_at_cap["remaining"] == 0
+    assert act_mgr.can_process_more_today(owner_id=user_bob) is False
+
+
+
 
 
 

@@ -42,6 +42,8 @@ from akkord.oauth import (
 
 PARIS_TZ = ZoneInfo("Europe/Paris")
 DAILY_FILE_LIMIT = int(os.environ.get("AKKORD_DAILY_LIMIT", "25"))
+ANON_DAILY_FILE_LIMIT = int(os.environ.get("AKKORD_ANON_DAILY_LIMIT", "5"))
+GLOBAL_DAILY_FILE_LIMIT = int(os.environ.get("AKKORD_GLOBAL_DAILY_LIMIT", "200"))
 DAILY_REPORT_HOUR = int(os.environ.get("AKKORD_DAILY_REPORT_HOUR", "18"))
 DAILY_REPORT_RECIPIENT = os.environ.get("AKKORD_DAILY_REPORT_EMAIL", ADMIN_EMAIL)
 
@@ -89,6 +91,7 @@ class DailyActivityRecord:
     digest_sent: bool = False
     digest_sent_at: str = ""
     quota_reset_baseline: int | None = None
+    owner_reset_baselines: dict[str, int] = field(default_factory=dict)
     entries: list[AnalyzedFileEntry] = field(default_factory=list)
 
 
@@ -236,6 +239,10 @@ class ActivityManager:
         elif existing.quota_reset_baseline is not None:
             baseline = max(baseline, existing.quota_reset_baseline)
 
+        merged_owner_baselines: dict[str, int] = dict(existing.owner_reset_baselines)
+        for k, v in incoming.owner_reset_baselines.items():
+            merged_owner_baselines[k] = max(v, merged_owner_baselines.get(k, 0))
+
         valid_cnt = sum(
             1 for e in merged_entries if e.mode in ("analyze", "add_chords")
         )
@@ -250,6 +257,7 @@ class ActivityManager:
             digest_sent=existing.digest_sent or incoming.digest_sent,
             digest_sent_at=incoming.digest_sent_at or existing.digest_sent_at,
             quota_reset_baseline=baseline,
+            owner_reset_baselines=merged_owner_baselines,
             entries=merged_entries,
         )
 
@@ -390,7 +398,14 @@ class ActivityManager:
                     self._records[day] = self._merge_day_records(existing, parsed)
         self._reconcile_day_with_firestore_jobs(day)
 
-    # --- Daily quota (25 files/day) ---
+    # --- Daily quota (25 files/day per authenticated user, 5/day for anonymous, 200/day global) ---
+    @staticmethod
+    def get_owner_daily_limit(owner_id: str | None = None) -> int:
+        cleaned = (owner_id or "").strip()
+        if cleaned.startswith("anon:"):
+            return ANON_DAILY_FILE_LIMIT
+        return DAILY_FILE_LIMIT
+
     def get_today_record(self) -> DailyActivityRecord:
         day = self.today_str()
         self._sync_day_from_firestore(day)
@@ -399,40 +414,96 @@ class ActivityManager:
                 self._records[day] = DailyActivityRecord(date=day)
             return self._records[day]
 
-    def get_quota_status(self) -> dict[str, Any]:
+    def get_quota_status(self, owner_id: str | None = None) -> dict[str, Any]:
         rec = self.get_today_record()
-        used = rec.processed_count
-        remaining = max(0, DAILY_FILE_LIMIT - used)
+        effective_owner = normalize_record_owner_id(owner_id or "", "")
+        owner_limit = self.get_owner_daily_limit(effective_owner)
+        admin_owner = f"user:{ADMIN_EMAIL.lower()}"
+
+        valid_entries = [
+            e for e in rec.entries if e.mode in ("analyze", "add_chords")
+        ]
+        global_used = len(valid_entries)
+        if (
+            global_used == 0
+            and rec.processed_count > 0
+            and rec.quota_reset_baseline is None
+            and not rec.owner_reset_baselines
+        ):
+            global_used = rec.processed_count
+
+        owner_valid_cnt = sum(
+            1
+            for e in valid_entries
+            if normalize_record_owner_id(e.owner_id, e.user_email) == effective_owner
+        )
+        if (
+            not valid_entries
+            and rec.processed_count > 0
+            and effective_owner == admin_owner
+            and rec.quota_reset_baseline is None
+            and not rec.owner_reset_baselines
+        ):
+            owner_valid_cnt = rec.processed_count
+
+        owner_baseline = rec.owner_reset_baselines.get(effective_owner)
+        if owner_baseline is None and effective_owner == admin_owner:
+            owner_baseline = rec.quota_reset_baseline
+
+        if owner_baseline is not None:
+            owner_used = max(0, owner_valid_cnt - owner_baseline)
+        else:
+            owner_used = owner_valid_cnt
+
+        owner_remaining = max(0, owner_limit - owner_used)
+        global_remaining = max(0, GLOBAL_DAILY_FILE_LIMIT - global_used)
+        remaining = min(owner_remaining, global_remaining)
+
         return {
             "date": rec.date,
-            "limit": DAILY_FILE_LIMIT,
-            "used": used,
+            "owner_id": effective_owner,
+            "limit": owner_limit,
+            "used": owner_used,
             "remaining": remaining,
+            "owner_remaining": owner_remaining,
+            "global_limit": GLOBAL_DAILY_FILE_LIMIT,
+            "global_used": global_used,
+            "global_remaining": global_remaining,
             "digest_sent": rec.digest_sent,
             "digest_hour": f"{DAILY_REPORT_HOUR:02d}:00",
         }
 
-    def can_process_more_today(self) -> bool:
-        rec = self.get_today_record()
-        return rec.processed_count < DAILY_FILE_LIMIT
+    def can_process_more_today(self, owner_id: str | None = None) -> bool:
+        status = self.get_quota_status(owner_id=owner_id)
+        return int(status.get("remaining", 0)) > 0
 
-    def reset_daily_quota(self, date_str: str | None = None) -> dict[str, Any]:
-        """Force-reset the daily 25-file quota counter to 0 (admin action) while preserving cost & history entries."""
+    def reset_daily_quota(
+        self, date_str: str | None = None, owner_id: str | None = None
+    ) -> dict[str, Any]:
+        """Force-reset the target owner's personal daily quota counter to 0 (admin action) without resetting the global 200/day cap."""
         day = date_str or self.today_str()
+        effective_owner = normalize_record_owner_id(owner_id or "", ADMIN_EMAIL)
+        admin_owner = f"user:{ADMIN_EMAIL.lower()}"
         self._sync_day_from_firestore(day, force=True)
+        prev_status = self.get_quota_status(owner_id=effective_owner)
+        previous_used = int(prev_status.get("used", 0))
         with self._lock:
             if day not in self._records:
                 self._records[day] = DailyActivityRecord(date=day)
             rec = self._records[day]
-            previous_used = rec.processed_count
-            valid_cnt = sum(
-                1 for e in rec.entries if e.mode in ("analyze", "add_chords")
+            owner_valid_cnt = sum(
+                1
+                for e in rec.entries
+                if e.mode in ("analyze", "add_chords")
+                and normalize_record_owner_id(e.owner_id, e.user_email) == effective_owner
             )
-            rec.quota_reset_baseline = valid_cnt
-            rec.processed_count = 0
+            rec.owner_reset_baselines[effective_owner] = owner_valid_cnt
+            if effective_owner == admin_owner:
+                rec.quota_reset_baseline = owner_valid_cnt
+                rec.processed_count = 0
             self._save(changed_day=day)
             self._last_remote_sync_ts = time.monotonic()
-        status = self.get_quota_status()
+        status = self.get_quota_status(owner_id=effective_owner)
         status["previous_used"] = previous_used
         return status
 
@@ -946,12 +1017,19 @@ class ActivityManager:
                     entries.append(ent)
             raw_baseline = rdata.get("quota_reset_baseline")
             baseline = int(raw_baseline) if raw_baseline is not None else None
+            raw_owner_baselines = rdata.get("owner_reset_baselines")
+            owner_baselines: dict[str, int] = {}
+            if isinstance(raw_owner_baselines, dict):
+                for k, v in raw_owner_baselines.items():
+                    if v is not None:
+                        owner_baselines[str(k)] = int(v)
             return DailyActivityRecord(
                 date=str(rdata.get("date") or day),
                 processed_count=int(rdata.get("processed_count", 0)),
                 digest_sent=bool(rdata.get("digest_sent", False)),
                 digest_sent_at=str(rdata.get("digest_sent_at", "")),
                 quota_reset_baseline=baseline,
+                owner_reset_baselines=owner_baselines,
                 entries=entries,
             )
         except Exception:
@@ -1085,6 +1163,7 @@ class ActivityManager:
             "digest_sent": rec.digest_sent,
             "digest_sent_at": rec.digest_sent_at,
             "quota_reset_baseline": rec.quota_reset_baseline,
+            "owner_reset_baselines": rec.owner_reset_baselines,
             "files_count": day_agg["files_count"],
             "input_tokens": day_agg["input_tokens"],
             "output_tokens": day_agg["output_tokens"],
