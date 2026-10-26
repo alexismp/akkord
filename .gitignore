@@ -29,9 +29,11 @@ _daily_activity.json
 # Scratch & One-off scripts
 add-chords.py
 
-# macOS / IDE
+# macOS / IDE / Build Artifacts
 .DS_Store
 .AppleDouble
 .LSOverride
 .idea/
 .vscode/
+target/
+rust-engine/target/
