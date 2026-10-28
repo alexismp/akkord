@@ -2078,16 +2078,70 @@ def test_per_user_anonymous_and_global_200_quota_enforcement(
     assert act_mgr.can_process_more_today(owner_id=user_bob) is False
 
 
+def test_interstaff_printed_chord_alignment_and_vector_context() -> None:
+    """Verify that printed chords on 2-staff scores anchor annotations to their exact x_pt and generate vector context."""
+    from akkord.harmony import (
+        _build_pdf_vector_context,
+        _postprocess_harmony_result,
+    )
+    from akkord.pdf_layout import PageLayout, StaffSystem
 
+    sys1 = StaffSystem(
+        index=1,
+        y_top_pt=700.0,
+        y_bottom_pt=627.5,
+        chord_y_pt=717.0,
+        treble_height_pt=20.0,
+        barlines_x_pt=[55.8, 177.1, 238.9, 331.6, 401.6, 496.0, 566.4],
+    )
+    sys2 = StaffSystem(
+        index=2,
+        y_top_pt=563.0,
+        y_bottom_pt=490.6,
+        chord_y_pt=580.0,
+        treble_height_pt=20.0,
+        barlines_x_pt=[39.0, 163.4, 229.2, 326.8, 401.6, 500.9, 566.4],
+    )
+    layout = PageLayout(page_num=1, width_pt=595.0, height_pt=842.0, systems=[sys1, sys2])
 
+    # Printed chord tokens located between the two staves (y=659.8 on S1, y=522.6 on S2)
+    chord_tokens = [
+        (1, 190.5, 659.8, "Am"),
+        (1, 344.5, 659.8, "E"),
+        (1, 176.1, 522.6, "Am"),
+        (1, 339.7, 522.6, "A7"),
+        (1, 512.9, 522.6, "Dm"),
+    ]
 
+    vec_ctx = _build_pdf_vector_context(chord_tokens, [layout])
+    assert "m.2 (x=177..239, beat1_x=190.5, printed_chord='Am' at x=190.5)" in vec_ctx
+    assert "m.8 (x=163..229, beat1_x=176.1, printed_chord='Am' at x=176.1)" in vec_ctx
+    assert "m.9 (x=229..327, beat1_x=242.1, printed_chord=none)" in vec_ctx
 
+    # Suppose Gemini omitted 'correct' annotations on m.2 and m.8 and placed m.4 and m.9 slightly off Beat 1
+    raw = HarmonyAnalysisResult(
+        is_music_sheet=True,
+        has_existing_chords=True,
+        title="La Partida",
+        detected_key="Am",
+        overall_summary="Venezuelan waltz in A minor.",
+        accuracy_score=82,
+        annotations=[
+            ChordAnnotation(page_num=1, system_index=1, x_pt=268.0, chord="Am/C", status="missing", suggested_chord="Am/C", measure_number=3),
+            ChordAnnotation(page_num=1, system_index=1, x_pt=362.0, chord="E", status="improve", suggested_chord="E7", measure_number=4),
+            ChordAnnotation(page_num=1, system_index=2, x_pt=260.0, chord="Am/C", status="missing", suggested_chord="Am/C", measure_number=9),
+        ],
+    )
 
+    processed = _postprocess_harmony_result(raw, [layout], lang="fr", chord_tokens=chord_tokens)
+    by_m = {a.measure_number: a for a in processed.annotations}
 
-
-
-
-
-
+    # Printed chords on m.2, m.4, m.8, m.10, m.12 are all present and locked to exact printed x_pt
+    assert by_m[2].chord == "Am" and by_m[2].status == "correct" and by_m[2].x_pt == 190.5
+    assert by_m[4].chord == "E" and by_m[4].suggested_chord == "E7" and by_m[4].x_pt == 344.5
+    assert by_m[8].chord == "Am" and by_m[8].status == "correct" and by_m[8].x_pt == 176.1
+    assert by_m[9].chord == "Am/C" and by_m[9].status == "missing" and by_m[9].x_pt == 242.1
+    assert by_m[10].chord == "A7" and by_m[10].status == "correct" and by_m[10].x_pt == 339.7
+    assert by_m[12].chord == "Dm" and by_m[12].status == "correct" and by_m[12].x_pt == 512.9
 
 

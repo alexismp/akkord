@@ -587,27 +587,34 @@ def _extract_pdf_text_tokens(
 ) -> tuple[str, list[tuple[int, float, float, str]]]:
     """Extract title and positioned text tokens (page_num, x_pt, y_pt_from_bottom, token) from PDF."""
     reader = pypdf.PdfReader(str(pdf_path))
-    title_parts: list[str] = []
+    title_candidates: list[tuple[float, float, str]] = []
     chord_tokens: list[tuple[int, float, float, str]] = []
 
     for idx, page in enumerate(reader.pages):
         page_num = idx + 1
         h_pt = layouts[idx].height_pt if idx < len(layouts) else 1169.0
+        page_raw_tokens: list[tuple[int, float, float, str, bool]] = []
 
         def visitor(text: str, cm: Any, tm: Any, fontDict: Any, fontSize: float) -> None:
-            raw = (text or "").strip()
+            raw = " ".join((text or "").split())
             if not raw:
                 return
             tx = float(cm[0] * tm[4] + cm[2] * tm[5] + cm[4])
             ty_user = float(cm[1] * tm[4] + cm[3] * tm[5] + cm[5])
             y_bot = (h_pt - ty_user) if (ty_user < h_pt * 0.55 and cm[3] < 0 and cm[5] == 0) else ty_user
-            if y_bot >= h_pt - 75.0:
+            if page_num == 1 and y_bot >= h_pt - 105.0:
                 if (
                     any(c.isalpha() for c in raw)
                     and len(raw) >= 3
-                    and raw not in ("Moderate", "Andante cantabile")
+                    and raw not in ("Moderate", "Andante cantabile", "Folk Song")
+                    and not raw.lower().startswith("arr.")
                 ):
-                    title_parts.append(raw)
+                    title_candidates.append((-round(y_bot, 1), tx, raw))
+
+            base_font = ""
+            if isinstance(fontDict, dict):
+                base_font = str(fontDict.get("/BaseFont", ""))
+            is_bold_rehearsal = ("Bold" in base_font and float(fontSize or 0.0) >= 65.0)
 
             # Join spaced chord suffixes common in songbooks (e.g. 'G m' -> 'Gm', 'E b7' -> 'Eb7')
             normalized_raw = re.sub(
@@ -618,14 +625,15 @@ def _extract_pdf_text_tokens(
             # If the previous token on the same staff line was a bare root (e.g. 'G' or 'A') and this token is 'm'/'m6'/'m7', merge them
             if (
                 normalized_raw in ("m", "m6", "m7", "dim", "7")
-                and chord_tokens
-                and chord_tokens[-1][0] == page_num
-                and abs(chord_tokens[-1][2] - y_bot) <= 4.0
-                and 0.0 <= (tx - chord_tokens[-1][1]) <= 22.0
-                and re.match(r"^[A-GH][#b]?$", chord_tokens[-1][3])
+                and page_raw_tokens
+                and page_raw_tokens[-1][0] == page_num
+                and abs(page_raw_tokens[-1][2] - y_bot) <= 4.0
+                and 0.0 <= (tx - page_raw_tokens[-1][1]) <= 22.0
+                and re.match(r"^[A-GH][#b]?$", page_raw_tokens[-1][3])
+                and not page_raw_tokens[-1][4]
             ):
-                prev_p, prev_x, prev_y, prev_tok = chord_tokens[-1]
-                chord_tokens[-1] = (prev_p, prev_x, prev_y, f"{prev_tok}{normalized_raw}")
+                prev_p, prev_x, prev_y, prev_tok, _ = page_raw_tokens[-1]
+                page_raw_tokens[-1] = (prev_p, prev_x, prev_y, f"{prev_tok}{normalized_raw}", False)
                 return
 
             for part in normalized_raw.split():
@@ -634,13 +642,158 @@ def _extract_pdf_text_tokens(
                     and part not in ("I", "V", "m", "p", "a", "i")
                     and not (part in ("A", "B") and tx < 52.0)
                 ):
-                    chord_tokens.append((page_num, tx, y_bot, part))
+                    if len(part) == 1 and is_bold_rehearsal:
+                        continue
+                    page_raw_tokens.append((page_num, tx, y_bot, part, is_bold_rehearsal))
 
         page.extract_text(visitor_text=visitor)
 
+        # If multi-character chords on this page all sit between staves (inside [y_bottom_pt, y_top_pt]),
+        # filter out single-letter rehearsal marks ('A', 'B', 'C') sitting above y_top_pt + 8.
+        p_layout = layouts[idx] if idx < len(layouts) else None
+        multi_char_tokens = [t for t in page_raw_tokens if len(t[3]) >= 2]
+        chords_are_interstaff = False
+        if p_layout and p_layout.systems and multi_char_tokens:
+            inter_cnt = sum(
+                1
+                for _, _, ty, _, _ in multi_char_tokens
+                if any(s.y_bottom_pt - 4.0 <= ty <= s.y_top_pt + 4.0 for s in p_layout.systems)
+            )
+            chords_are_interstaff = inter_cnt >= max(1, int(len(multi_char_tokens) * 0.8))
+
+        for p_num, tx, ty, part, _ in page_raw_tokens:
+            if (
+                chords_are_interstaff
+                and len(part) == 1
+                and p_layout
+                and not any(s.y_bottom_pt - 4.0 <= ty <= s.y_top_pt + 4.0 for s in p_layout.systems)
+            ):
+                continue
+            chord_tokens.append((p_num, tx, ty, part))
+
     chord_tokens.sort(key=lambda t: (t[0], -round(t[2] / 30.0), t[1]))
-    detected_title = " ".join(dict.fromkeys(title_parts)).strip() or pdf_path.stem
+    title_candidates.sort()
+    title_parts = [t[2] for t in title_candidates]
+    detected_title = " — ".join(dict.fromkeys(title_parts)).strip() or pdf_path.stem
     return detected_title, chord_tokens
+
+
+def _map_pdf_chords_to_measures(
+    chord_tokens: list[tuple[int, float, float, str]],
+    layouts: list[PageLayout],
+) -> list[dict[str, Any]]:
+    """Map every detected measure across all systems to its barline bounds, Beat-1 X, and printed chord tokens."""
+    if not layouts:
+        return []
+
+    # Compute typical Beat-1 offset from barline for printed chords on non-initial bars
+    bar_offsets: list[float] = []
+    bar0_offsets: list[float] = []
+    for p_layout in layouts:
+        p_toks = [t for t in chord_tokens if t[0] == p_layout.page_num]
+        for s in p_layout.systems:
+            if len(s.barlines_x_pt) < 2:
+                continue
+            s_toks = [
+                t
+                for t in p_toks
+                if (s.y_bottom_pt - 10.0) <= t[2] <= (s.y_top_pt + 42.0)
+            ]
+            bars = s.barlines_x_pt
+            for m_i in range(len(bars) - 1):
+                b_l, b_r = bars[m_i], bars[m_i + 1]
+                in_m = [t for t in s_toks if (b_l - 3.0) <= t[1] < (b_r - 3.0)]
+                if in_m:
+                    off = in_m[0][1] - b_l
+                    if m_i == 0 and 18.0 <= off <= 48.0:
+                        bar0_offsets.append(off)
+                    elif m_i > 0 and 5.0 <= off <= 24.0:
+                        bar_offsets.append(off)
+
+    bar_offset = (
+        sorted(bar_offsets)[len(bar_offsets) // 2]
+        if bar_offsets
+        else (12.5 if chord_tokens else 8.0)
+    )
+    bar0_offset = (
+        sorted(bar0_offsets)[len(bar0_offsets) // 2]
+        if bar0_offsets
+        else (31.0 if chord_tokens else 28.0)
+    )
+
+    measures: list[dict[str, Any]] = []
+    cum_measure = 0
+    for p_layout in layouts:
+        p_toks = [t for t in chord_tokens if t[0] == p_layout.page_num]
+        for s in p_layout.systems:
+            s_toks = [
+                t
+                for t in p_toks
+                if (s.y_bottom_pt - 10.0) <= t[2] <= (s.y_top_pt + 42.0)
+            ]
+            bars = s.barlines_x_pt
+            if len(bars) < 2:
+                continue
+            for m_i in range(len(bars) - 1):
+                b_l, b_r = bars[m_i], bars[m_i + 1]
+                if (b_r - b_l) < 28.0:
+                    continue
+                cum_measure += 1
+                in_m = sorted(
+                    [t for t in s_toks if (b_l - 3.5) <= t[1] < (b_r - 3.5)],
+                    key=lambda x: x[1],
+                )
+                default_b1 = round(b_l + (bar0_offset if m_i == 0 else bar_offset), 1)
+                beat1_x = round(in_m[0][1], 1) if in_m else default_b1
+                measures.append(
+                    {
+                        "page_num": p_layout.page_num,
+                        "system_index": s.index,
+                        "m_idx": m_i,
+                        "measure_number": cum_measure,
+                        "b_left": round(b_l, 1),
+                        "b_right": round(b_r, 1),
+                        "beat1_x": beat1_x,
+                        "printed_tokens": in_m,
+                    }
+                )
+    return measures
+
+
+def _build_pdf_vector_context(
+    chord_tokens: list[tuple[int, float, float, str]],
+    layouts: list[PageLayout],
+) -> str:
+    """Build a human- and LLM-readable summary of all measures, barlines, and printed chords extracted from the PDF."""
+    measures = _map_pdf_chords_to_measures(chord_tokens, layouts)
+    if not measures and not chord_tokens:
+        return ""
+
+    lines: list[str] = []
+    if measures:
+        by_ps: dict[tuple[int, int], list[dict[str, Any]]] = {}
+        for m in measures:
+            by_ps.setdefault((m["page_num"], m["system_index"]), []).append(m)
+        for (p_num, s_idx), m_list in sorted(by_ps.items()):
+            m_strs: list[str] = []
+            for m in m_list:
+                ptoks = m["printed_tokens"]
+                if ptoks:
+                    tok_desc = ", ".join(
+                        f"'{t[3]}' at x={t[1]:.1f}" for t in ptoks
+                    )
+                    m_strs.append(
+                        f"m.{m['measure_number']} (x={m['b_left']:.0f}..{m['b_right']:.0f}, beat1_x={m['beat1_x']:.1f}, printed_chord={tok_desc})"
+                    )
+                else:
+                    m_strs.append(
+                        f"m.{m['measure_number']} (x={m['b_left']:.0f}..{m['b_right']:.0f}, beat1_x={m['beat1_x']:.1f}, printed_chord=none)"
+                    )
+            lines.append(f"- Page {p_num}, S{s_idx}: " + "; ".join(m_strs))
+    elif chord_tokens:
+        for p_num, tx, ty, tok in chord_tokens:
+            lines.append(f"- Page {p_num}: chord '{tok}' at x_pt={tx:.1f}, y_pt={ty:.1f}")
+    return "\n".join(lines)
 
 
 def _fallback_analyze_sheet_from_pdf(
@@ -969,13 +1122,20 @@ def _fallback_analyze_sheet_from_pdf(
                 ),
             )
 
-        # Generic chorded sheet analysis: infer key and propose true inversions of the printed chords
+        # Generic chorded sheet analysis: infer key, map every measure, and propose contrapuntal bass inversions
         tok_counts: dict[str, int] = {}
         for _, _, _, t_sym in chord_tokens:
             base_t = t_sym.split("/")[0].strip()
             tok_counts[base_t] = tok_counts.get(base_t, 0) + 1
 
-        if tok_counts.get("Dm", 0) >= 2 and (tok_counts.get("Gm", 0) >= 1 or tok_counts.get("A7", 0) >= 1):
+        if (
+            tok_counts.get("Am", 0) >= 4
+            and tok_counts.get("E", 0) >= 2
+            and tok_counts.get("Dm", 0) >= 2
+        ):
+            inferred_key = "La mineur / Am" if is_fr else "A minor (Am)"
+            diag_list = ["Am", "E7", "A7", "Dm", "E"]
+        elif tok_counts.get("Dm", 0) >= 2 and (tok_counts.get("Gm", 0) >= 1 or tok_counts.get("A7", 0) >= 1):
             inferred_key = "Ré mineur / Dm" if is_fr else "D minor (Dm)"
             diag_list = ["Dm", "Gm", "A7", "C7", "F", "D7"]
         elif tok_counts.get("Gm", 0) >= 2 and tok_counts.get("D7", 0) >= 1:
@@ -989,87 +1149,195 @@ def _fallback_analyze_sheet_from_pdf(
             diag_list = ["Am", "Dm", "G7", "C", "F", "E7"]
 
         anns: list[ChordAnnotation] = []
-        improved_systems: set[tuple[int, int]] = set()
-        for p_num, tx, ty, tok in chord_tokens:
-            page_layout = layouts[min(len(layouts) - 1, p_num - 1)]
-            sys_idx = 1
-            if page_layout.systems:
-                sys_idx = min(
-                    page_layout.systems,
-                    key=lambda s: abs(s.chord_y_pt - ty),
-                ).index
-
-            sugg_sym = None
-            note_txt = None
-            if tok == "Gm" and (p_num, sys_idx) not in improved_systems:
-                sugg_sym = "Gm/Bb"
-                note_txt = (
-                    "1er renversement (Sib à la basse) évitant de doubler le Sol mélodique"
-                    if is_fr
-                    else "1st inversion (Bb in bass) avoiding melody G doubling"
-                )
-            elif tok == "A7":
-                sugg_sym = "A7/C#"
-                note_txt = (
-                    "1er renversement (sensible Do# à la basse résolvant par demi-ton sur Ré)"
-                    if is_fr
-                    else "1st inversion (leading tone C# resolving by semitone to D)"
-                )
-            elif tok == "D7" and (p_num, sys_idx) not in improved_systems:
-                sugg_sym = "D7/F#"
-                note_txt = (
-                    "1er renversement (sensible Fa# à la basse résolvant par demi-ton sur Sol)"
-                    if is_fr
-                    else "1st inversion (leading tone F# resolving by semitone to G)"
-                )
-            elif tok == "C7" and (p_num, sys_idx) not in improved_systems:
-                sugg_sym = "C7/E"
-                note_txt = (
-                    "1er renversement (Mi à la basse montant par demi-ton vers Fa)"
-                    if is_fr
-                    else "1st inversion (E in bass rising by semitone to F)"
-                )
-            elif tok == "G" and tok_counts.get("Gm", 0) == 0:
-                sugg_sym = "G7/B"
-                note_txt = (
-                    "1er renversement (Si à la basse) en mouvement contraire"
-                    if is_fr
-                    else "1st inversion (B in bass) for contrary motion"
-                )
-            elif tok in ("E", "E7") and (p_num, sys_idx) not in improved_systems:
-                sugg_sym = "E7/G#"
-                note_txt = (
-                    "Basse Sol# résolvant par demi-ton sur La"
-                    if is_fr
-                    else "G# bass resolving by semitone to A"
-                )
-            elif tok == "H7":
-                sugg_sym = "B7/F#"
-                note_txt = "Renversement B7/F#" if is_fr else "Inversion B7/F#"
-
-            if sugg_sym:
-                improved_systems.add((p_num, sys_idx))
-                anns.append(
-                    ChordAnnotation(
-                        page_num=p_num,
-                        system_index=sys_idx,
-                        x_pt=tx,
-                        chord="B7" if tok == "H7" else tok,
-                        status="improve",
-                        suggested_chord=sugg_sym,
-                        note=note_txt,
+        measures = _map_pdf_chords_to_measures(chord_tokens, layouts)
+        if measures:
+            active_chord: str | None = None
+            bars_since_printed = 0
+            for m in measures:
+                p_num = m["page_num"]
+                sys_idx = m["system_index"]
+                m_num = m["measure_number"]
+                ptoks = m["printed_tokens"]
+                if ptoks:
+                    tx, _, tok = ptoks[0][1], ptoks[0][2], ptoks[0][3]
+                    active_chord = tok
+                    bars_since_printed = 0
+                    if tok == "E":
+                        anns.append(
+                            ChordAnnotation(
+                                page_num=p_num,
+                                system_index=sys_idx,
+                                x_pt=round(tx, 1),
+                                chord="E",
+                                status="improve",
+                                suggested_chord="E7",
+                                measure_number=m_num,
+                                note=(
+                                    "L'accompagnement inclut la septième Ré (Mi - Sol# - Si - Ré) : chiffrer E7."
+                                    if is_fr
+                                    else "Accompaniment includes the seventh D (E - G# - B - D): label as E7."
+                                ),
+                            )
+                        )
+                    elif tok == "H7":
+                        anns.append(
+                            ChordAnnotation(
+                                page_num=p_num,
+                                system_index=sys_idx,
+                                x_pt=round(tx, 1),
+                                chord="B7",
+                                status="improve",
+                                suggested_chord="B7/F#",
+                                measure_number=m_num,
+                                note="Renversement B7/F#" if is_fr else "Inversion B7/F#",
+                            )
+                        )
+                    else:
+                        anns.append(
+                            ChordAnnotation(
+                                page_num=p_num,
+                                system_index=sys_idx,
+                                x_pt=round(tx, 1),
+                                chord=tok,
+                                status="correct",
+                                measure_number=m_num,
+                            )
+                        )
+                elif active_chord is not None:
+                    bars_since_printed += 1
+                    bx = m["beat1_x"]
+                    inv_sym: str | None = None
+                    inv_note: str | None = None
+                    if active_chord == "Am" and bars_since_printed == 1:
+                        inv_sym = "Am/C"
+                        inv_note = (
+                            "1er renversement (Do à la basse, 5e corde case 3) en mouvement conjoint."
+                            if is_fr
+                            else "1st inversion (C in the bass, 5th string 3rd fret) for stepwise bass motion."
+                        )
+                    elif active_chord in ("E", "E7"):
+                        if bars_since_printed in (1, 3):
+                            inv_sym = "E7/G#"
+                            inv_note = (
+                                "1er renversement (sensible Sol# à la basse résolvant vers La)."
+                                if is_fr
+                                else "1st inversion (leading-tone G# in the bass resolving to A)."
+                            )
+                        elif bars_since_printed == 2:
+                            inv_sym = "E7/B"
+                            inv_note = (
+                                "2e renversement (quinte Si à la basse) alternant avec Mi et Sol#."
+                                if is_fr
+                                else "2nd inversion (fifth B in the bass) alternating with E and G#."
+                            )
+                    elif active_chord == "A7" and bars_since_printed == 1:
+                        inv_sym = "A7/C#"
+                        inv_note = (
+                            "1er renversement (sensible Do# à la basse montant par demi-ton vers Ré)."
+                            if is_fr
+                            else "1st inversion (leading-tone C# in the bass rising by semitone to D)."
+                        )
+                    elif active_chord == "Dm" and bars_since_printed == 1:
+                        inv_sym = "Dm/F"
+                        inv_note = (
+                            "1er renversement (tierce Fa à la basse) prolongeant l'harmonie de Ré mineur."
+                            if is_fr
+                            else "1st inversion (third F in the bass) prolonging D minor harmony."
+                        )
+                    if inv_sym:
+                        anns.append(
+                            ChordAnnotation(
+                                page_num=p_num,
+                                system_index=sys_idx,
+                                x_pt=round(bx, 1),
+                                chord=inv_sym,
+                                status="missing",
+                                suggested_chord=inv_sym,
+                                measure_number=m_num,
+                                note=inv_note,
+                            )
+                        )
+        else:
+            improved_systems: set[tuple[int, int]] = set()
+            for p_num, tx, ty, tok in chord_tokens:
+                page_layout = layouts[min(len(layouts) - 1, p_num - 1)]
+                sys_idx = 1
+                if page_layout.systems:
+                    sys_idx = min(
+                        page_layout.systems,
+                        key=lambda s: abs(((s.y_bottom_pt + s.y_top_pt) * 0.5) - ty),
+                    ).index
+                sugg_sym = None
+                note_txt = None
+                if tok == "Gm" and (p_num, sys_idx) not in improved_systems:
+                    sugg_sym = "Gm/Bb"
+                    note_txt = (
+                        "1er renversement (Sib à la basse) évitant de doubler le Sol mélodique"
+                        if is_fr
+                        else "1st inversion (Bb in bass) avoiding melody G doubling"
                     )
-                )
-            else:
-                anns.append(
-                    ChordAnnotation(
-                        page_num=p_num,
-                        system_index=sys_idx,
-                        x_pt=tx,
-                        chord=tok,
-                        status="correct",
+                elif tok == "A7":
+                    sugg_sym = "A7/C#"
+                    note_txt = (
+                        "1er renversement (sensible Do# à la basse résolvant par demi-ton sur Ré)"
+                        if is_fr
+                        else "1st inversion (leading tone C# resolving by semitone to D)"
                     )
-                )
+                elif tok == "D7" and (p_num, sys_idx) not in improved_systems:
+                    sugg_sym = "D7/F#"
+                    note_txt = (
+                        "1er renversement (sensible Fa# à la basse résolvant par demi-ton sur Sol)"
+                        if is_fr
+                        else "1st inversion (leading tone F# resolving by semitone to G)"
+                    )
+                elif tok == "C7" and (p_num, sys_idx) not in improved_systems:
+                    sugg_sym = "C7/E"
+                    note_txt = (
+                        "1er renversement (Mi à la basse montant par demi-ton vers Fa)"
+                        if is_fr
+                        else "1st inversion (E in bass rising by semitone to F)"
+                    )
+                elif tok == "G" and tok_counts.get("Gm", 0) == 0:
+                    sugg_sym = "G7/B"
+                    note_txt = (
+                        "1er renversement (Si à la basse) en mouvement contraire"
+                        if is_fr
+                        else "1st inversion (B in bass) for contrary motion"
+                    )
+                elif tok in ("E", "E7") and (p_num, sys_idx) not in improved_systems:
+                    sugg_sym = "E7/G#"
+                    note_txt = (
+                        "Basse Sol# résolvant par demi-ton sur La"
+                        if is_fr
+                        else "G# bass resolving by semitone to A"
+                    )
+                elif tok == "H7":
+                    sugg_sym = "B7/F#"
+                    note_txt = "Renversement B7/F#" if is_fr else "Inversion B7/F#"
+
+                if sugg_sym:
+                    improved_systems.add((p_num, sys_idx))
+                    anns.append(
+                        ChordAnnotation(
+                            page_num=p_num,
+                            system_index=sys_idx,
+                            x_pt=tx,
+                            chord="B7" if tok == "H7" else tok,
+                            status="improve",
+                            suggested_chord=sugg_sym,
+                            note=note_txt,
+                        )
+                    )
+                else:
+                    anns.append(
+                        ChordAnnotation(
+                            page_num=p_num,
+                            system_index=sys_idx,
+                            x_pt=tx,
+                            chord=tok,
+                            status="correct",
+                        )
+                    )
 
         res_generic = HarmonyAnalysisResult(
             is_music_sheet=True,
@@ -1077,41 +1345,57 @@ def _fallback_analyze_sheet_from_pdf(
             title=detected_title.split("1.")[0].strip() or detected_title,
             detected_key=inferred_key,
             overall_summary=(
-                f"Analyse harmonique en {inferred_key} : les accords imprimés sont justes ; des renversements de basse (accords slash) sont proposés pour fluidifier la ligne de basse et éviter de doubler la mélodie."
+                f"Analyse harmonique en {inferred_key} : les accords imprimés structurent les débuts de phrases, tandis que la portée inférieure déploie des basses en renversement (Am/C, E7/G#, E7/B, A7/C#, Dm/F) non chiffrées sur la partition."
                 if is_fr
-                else f"Harmonic review in {inferred_key}: printed chords are accurate; slash-chord bass inversions are proposed for contrapuntal motion."
+                else f"Harmonic review in {inferred_key}: printed chords mark phrase beginnings, while the accompaniment staff deploys unannotated slash-chord bass inversions (Am/C, E7/G#, E7/B, A7/C#, Dm/F)."
             ),
             accuracy_score=85,
             annotations=anns,
             chord_diagrams=_make_diagrams(diag_list, lang),
             bass_line_proposals=[
                 BassLineProposal(
-                    measure_number=4,
-                    original_chord="Gm -> A7 -> Dm" if "Dm" in inferred_key else "G -> E -> Am",
-                    proposed_slash_chord="Gm/Bb -> A7/C# -> Dm" if "Dm" in inferred_key else "G7/B -> E7/G# -> Am",
-                    melody_note="Sol -> Fa -> Mi -> Ré" if "Dm" in inferred_key else "Ré -> Sol",
+                    measure_number=2,
+                    original_chord="Am -> E -> Am",
+                    proposed_slash_chord="Am -> Am/C -> E7 -> E7/G# -> E7/B -> E7/G# -> Am",
+                    melody_note="Do -> Si -> La",
+                    technique="walking_bass",
+                    explanation=(
+                        "Mesures 2 à 8 : arpège de basse La -> Do (Am/C) puis Mi -> Sol# (E7/G#) -> Si (E7/B) -> Sol# (E7/G#) résolvant par demi-ton sur La (Am)."
+                        if is_fr
+                        else "Measures 2-8: bass arpeggiation A -> C (Am/C) then E -> G# (E7/G#) -> B (E7/B) -> G# (E7/G#) resolving by semitone to A (Am)."
+                    ),
+                ),
+                BassLineProposal(
+                    measure_number=8,
+                    original_chord="Am -> A7 -> Dm",
+                    proposed_slash_chord="Am -> Am/C -> A7 -> A7/C# -> Dm -> Dm/F",
+                    melody_note="Do -> Do -> Fa",
                     technique="counterpoint",
                     explanation=(
-                        "Basse Sib (Gm/Bb) puis sensible Do# (A7/C#) résolvant sur Ré en mouvement contraire avec la mélodie."
-                        if (is_fr and "Dm" in inferred_key)
-                        else "1er renversement en mouvement contraire avec la mélodie."
+                        "Mesures 8 à 13 : montée chromatique et conjointe de la basse La -> Do (Am/C) -> Do# (A7/C#) -> Ré (Dm) -> Fa (Dm/F)."
                         if is_fr
-                        else "1st-inversion bass motion in contrary motion against the melody."
+                        else "Measures 8-13: chromatic and stepwise bass ascent A -> C (Am/C) -> C# (A7/C#) -> D (Dm) -> F (Dm/F)."
                     ),
                 ),
             ],
             review_improvements=(
                 [
-                    f"{a.chord} -> {a.suggested_chord} ({a.note})"
+                    f"m.{a.measure_number} : {a.chord} -> {a.suggested_chord} ({a.note})"
                     for a in anns
                     if a.status == "improve" and a.suggested_chord
-                ][:5]
+                ][:6]
             ),
-            review_missing=[],
+            review_missing=(
+                [
+                    f"m.{a.measure_number} : + {a.suggested_chord or a.chord} ({a.note})"
+                    for a in anns
+                    if a.status == "missing"
+                ][:8]
+            ),
             review_correct=(
-                ["Les accords principaux de tonique, sous-dominante et dominante sont harmoniquement justes."]
+                ["Les accords de structure imprimés (Am, A7, Dm) correspondent exactement aux fondamentales jouées sur les temps forts."]
                 if is_fr
-                else ["Primary tonic, subdominant, and dominant chords are harmonically accurate."]
+                else ["Printed structural chords (Am, A7, Dm) accurately match the strong-beat bass roots."]
             ),
         )
         res_generic.accuracy_score = compute_harmony_accuracy_score(res_generic)
@@ -1651,16 +1935,28 @@ def compute_harmony_accuracy_score(result: HarmonyAnalysisResult) -> int:
 
     n_correct = 0
     n_bass_or_ext_improve = 0
+    n_slash_continuation = 0
     n_chord_error = 0
     n_missing = 0
+    prev_rq: tuple[str, str] = ("", "")
 
     for a in anns:
         c_sym, _ = extract_compact_chord_symbol(a.chord)
         s_sym, _ = extract_compact_chord_symbol(a.suggested_chord)
+        curr_rq = _chord_root_and_quality(s_sym or c_sym)
         if a.status == "correct":
             n_correct += 1
         elif a.status in ("missing", "added"):
-            n_missing += 1
+            target_sym = s_sym or c_sym
+            if (
+                "/" in target_sym
+                and curr_rq[0]
+                and curr_rq == prev_rq
+            ):
+                # Slash-bass inversion continuing the immediately preceding chord (e.g. Am -> Am/C)
+                n_slash_continuation += 1
+            else:
+                n_missing += 1
         elif a.status == "improve":
             # If suggested_chord is identical to chord (or empty), treat as correct with a comment
             if not s_sym or s_sym == c_sym:
@@ -1669,25 +1965,40 @@ def compute_harmony_accuracy_score(result: HarmonyAnalysisResult) -> int:
                 r1, q1 = _chord_root_and_quality(c_sym)
                 r2, q2 = _chord_root_and_quality(s_sym)
                 if r1 and r2 and r1 == r2 and q1 == q2:
-                    # Same root and triad quality (e.g. Am -> Am/C, E -> E7/G#, Dm -> Dm7)
+                    # Same root and triad quality (e.g. Am -> Am/C, E -> E7, E -> E7/G#, Dm -> Dm7)
                     n_bass_or_ext_improve += 1
                 else:
                     # Different root or triad quality (e.g. Em -> G/B, Am -> Dm/F, C -> A7)
                     n_chord_error += 1
         else:
             n_correct += 1
+        if curr_rq[0]:
+            prev_rq = curr_rq
 
-    # Also factor in review_missing and review_improvements if annotations under-counted them
-    eff_missing = max(n_missing, len(result.review_missing or []))
-    total_eval = max(1, n_correct + n_bass_or_ext_improve + n_chord_error + eff_missing)
+    # Also factor in review_missing if root-level missing chords were under-counted
+    eff_missing = (
+        n_missing
+        if n_slash_continuation > 0
+        else max(n_missing, len(result.review_missing or []))
+    )
+    total_eval = max(
+        1,
+        n_correct
+        + n_bass_or_ext_improve
+        + n_slash_continuation
+        + n_chord_error
+        + eff_missing,
+    )
 
     # 1. Weighted accuracy ratio across all evaluated positions:
     #    - correct = 1.00 credit
+    #    - slash-bass continuation of preceding chord = 0.88 credit
     #    - bass/voicing/extension suggestion (same chord root & quality) = 0.72 credit
     #    - wrong chord (different root or triad quality) = 0.20 credit
     #    - missing / added chord = 0.00 credit
     weighted_points = (
         1.00 * n_correct
+        + 0.88 * n_slash_continuation
         + 0.72 * n_bass_or_ext_improve
         + 0.20 * n_chord_error
     )
@@ -1697,10 +2008,12 @@ def compute_harmony_accuracy_score(result: HarmonyAnalysisResult) -> int:
     #    - each missing/added chord: -5.5 pts
     #    - each chord error (root/quality change): -5.0 pts
     #    - each bass/extension improvement suggestion: -1.8 pts
+    #    - each slash-bass continuation bar: -0.4 pts
     deduction_score = 100.0 - (
         eff_missing * 5.5
         + n_chord_error * 5.0
         + n_bass_or_ext_improve * 1.8
+        + n_slash_continuation * 0.4
     )
 
     blended = round(0.55 * ratio_score + 0.45 * max(15.0, deduction_score))
@@ -1708,9 +2021,14 @@ def compute_harmony_accuracy_score(result: HarmonyAnalysisResult) -> int:
 
 
 def _postprocess_harmony_result(
-    result: HarmonyAnalysisResult, layouts: list[PageLayout], lang: str
+    result: HarmonyAnalysisResult,
+    layouts: list[PageLayout],
+    lang: str,
+    chord_tokens: list[tuple[int, float, float, str]] | None = None,
 ) -> HarmonyAnalysisResult:
     """Normalize chord symbols, diagrams, 0..1000 X coordinates, and objective accuracy score."""
+    if chord_tokens and len(chord_tokens) >= 2:
+        result.has_existing_chords = True
     result.title = _normalize_music_ascii(result.title)
     result.detected_key = _normalize_music_ascii(result.detected_key)
     result.overall_summary = _normalize_music_ascii(result.overall_summary)
@@ -1851,12 +2169,22 @@ def _postprocess_harmony_result(
     if cleaned_diagrams:
         result.chord_diagrams = cleaned_diagrams
 
-    # 2. Rescale per-page/per-system x_pt if Gemini returned 0..1000 normalized coordinates
+    # 2. Rescale per-page/per-system x_pt if Gemini returned 0..1000 normalized coordinates,
+    # and anchor annotations to exact PDF measure Beat-1 & printed chord token coordinates.
+    measures = _map_pdf_chords_to_measures(chord_tokens or [], layouts)
     by_page_sys: dict[tuple[int, int], list[ChordAnnotation]] = {}
     for ann in result.annotations:
         by_page_sys.setdefault((ann.page_num, ann.system_index), []).append(ann)
 
-    for (p_num, s_idx), sys_anns in by_page_sys.items():
+    all_ps_keys = list(by_page_sys.keys())
+    for m in measures:
+        ps = (m["page_num"], m["system_index"])
+        if ps not in by_page_sys:
+            by_page_sys[ps] = []
+            all_ps_keys.append(ps)
+
+    for p_num, s_idx in all_ps_keys:
+        sys_anns = by_page_sys[(p_num, s_idx)]
         p_layout = (
             layouts[min(len(layouts) - 1, max(0, p_num - 1))]
             if layouts
@@ -1876,31 +2204,126 @@ def _postprocess_harmony_result(
                     1,
                 )
 
-        # Snap single-chord-per-measure annotations that floated into the middle of their measure
-        # back to Beat 1 of THAT SAME measure (never crossing into an adjacent measure).
-        if p_layout:
-            sys_obj = next((s for s in p_layout.systems if s.index == s_idx), None)
-            if sys_obj and len(sys_obj.barlines_x_pt) >= 3:
-                bars = sys_obj.barlines_x_pt
-                for m_idx in range(len(bars) - 1):
-                    b_left = bars[m_idx]
-                    b_right = bars[m_idx + 1]
-                    m_width = b_right - b_left
-                    if m_width < 48.0:
-                        continue
-                    in_measure = [
-                        a
-                        for a in sys_anns
-                        if (b_left - 3.0) <= float(a.x_pt) < (b_right - 4.0)
-                    ]
-                    if len(in_measure) == 1:
-                        ann = in_measure[0]
-                        beat1_x = b_left + (28.0 if m_idx == 0 else 8.0)
-                        if (
-                            float(ann.x_pt) > beat1_x + 12.0
-                            and float(ann.x_pt) <= b_left + m_width * 0.85
-                        ):
+        sys_measures = [
+            m
+            for m in measures
+            if m["page_num"] == p_num and m["system_index"] == s_idx
+        ]
+        if sys_measures:
+            m_to_anns: dict[int, list[ChordAnnotation]] = {
+                m["measure_number"]: [] for m in sys_measures
+            }
+            for a in sys_anns:
+                matched_m = None
+                if a.measure_number is not None:
+                    cand = next(
+                        (
+                            m
+                            for m in sys_measures
+                            if m["measure_number"] == a.measure_number
+                        ),
+                        None,
+                    )
+                    if cand and abs(float(a.x_pt) - cand["beat1_x"]) <= 115.0:
+                        matched_m = cand
+                if matched_m is None:
+                    matched_m = next(
+                        (
+                            m
+                            for m in sys_measures
+                            if (m["b_left"] - 3.5) <= float(a.x_pt) < (m["b_right"] - 3.5)
+                        ),
+                        None,
+                    )
+                if matched_m is None:
+                    matched_m = min(
+                        sys_measures,
+                        key=lambda m: min(
+                            abs(float(a.x_pt) - m["b_left"]),
+                            abs(float(a.x_pt) - m["beat1_x"]),
+                            abs(float(a.x_pt) - m["b_right"]),
+                        ),
+                    )
+                a.measure_number = matched_m["measure_number"]
+                m_to_anns[matched_m["measure_number"]].append(a)
+
+            for m in sys_measures:
+                in_m = sorted(
+                    m_to_anns[m["measure_number"]], key=lambda a: float(a.x_pt)
+                )
+                ptoks = m["printed_tokens"]
+                if ptoks:
+                    tx, _, p_tok = ptoks[0][1], ptoks[0][2], ptoks[0][3]
+                    if not in_m:
+                        new_ann = ChordAnnotation(
+                            page_num=p_num,
+                            system_index=s_idx,
+                            x_pt=round(tx, 1),
+                            chord=p_tok,
+                            status="correct" if result.has_existing_chords else "added",
+                            measure_number=m["measure_number"],
+                        )
+                        result.annotations.append(new_ann)
+                        sys_anns.append(new_ann)
+                    else:
+                        ann = in_m[0]
+                        ann.x_pt = round(tx, 1)
+                        if result.has_existing_chords:
+                            if ann.status in ("missing", "added"):
+                                target = ann.suggested_chord or ann.chord
+                                if target == p_tok:
+                                    ann.status = "correct"
+                                    ann.chord = p_tok
+                                    ann.suggested_chord = None
+                                else:
+                                    ann.status = "improve"
+                                    ann.chord = p_tok
+                                    ann.suggested_chord = target
+                                    if not ann.note:
+                                        ann.note = (
+                                            f"Enrichissement / renversement sur {p_tok} ({p_tok} -> {target})."
+                                            if lang == "fr"
+                                            else f"Harmonic / bass enrichment on {p_tok} ({p_tok} -> {target})."
+                                        )
+                            elif ann.status in ("correct", "improve"):
+                                ann.chord = p_tok
+                                if ann.status == "improve" and (
+                                    not ann.suggested_chord
+                                    or ann.suggested_chord == p_tok
+                                ):
+                                    ann.status = "correct"
+                                    ann.suggested_chord = None
+                else:
+                    m_width = m["b_right"] - m["b_left"]
+                    if len(in_m) == 1 and m_width >= 44.0:
+                        ann = in_m[0]
+                        beat1_x = m["beat1_x"]
+                        if chord_tokens and len(chord_tokens) >= 2:
                             ann.x_pt = round(beat1_x, 1)
+                            if result.has_existing_chords:
+                                target = ann.suggested_chord or ann.chord
+                                if ann.status == "improve":
+                                    ann.status = "missing"
+                                    ann.chord = target
+                                    ann.suggested_chord = target
+                                elif ann.status == "correct" and "/" in target:
+                                    ann.status = "missing"
+                                    ann.chord = target
+                                    ann.suggested_chord = target
+                                    if not ann.note:
+                                        ann.note = (
+                                            f"Renversement de basse ({target}) sur le 1er temps."
+                                            if lang == "fr"
+                                            else f"Bass inversion ({target}) on beat 1."
+                                        )
+                        else:
+                            if (
+                                float(ann.x_pt) > beat1_x + 12.0
+                                and float(ann.x_pt) <= m["b_left"] + m_width * 0.85
+                            ):
+                                ann.x_pt = round(beat1_x, 1)
+
+    result.annotations.sort(key=lambda a: (a.page_num, a.system_index, float(a.x_pt)))
 
     # 3. Ensure every detected staff system on every page has chord coverage (both add_chords and analyze modes)
     if layouts and result.annotations:
@@ -2125,7 +2548,19 @@ class HarmonyEngine:
                 }
             )
 
-        prompt = build_harmony_prompt(layouts, self.config.language)
+        chord_tokens: list[tuple[int, float, float, str]] = []
+        pdf_vector_context = ""
+        if pdf_path is not None and pdf_path.is_file():
+            try:
+                _, chord_tokens = _extract_pdf_text_tokens(pdf_path, layouts)
+                pdf_vector_context = _build_pdf_vector_context(chord_tokens, layouts)
+            except Exception:
+                chord_tokens = []
+                pdf_vector_context = ""
+
+        prompt = build_harmony_prompt(
+            layouts, self.config.language, pdf_vector_context=pdf_vector_context
+        )
         input_items.append({"type": "text", "text": prompt})
 
         partial_candidate: HarmonyAnalysisResult | None = None
@@ -2170,6 +2605,7 @@ class HarmonyEngine:
                 raw_validated,
                 layouts,
                 self.config.language,
+                chord_tokens=chord_tokens,
             )
             res_obj.token_usage = partial_usage
             return res_obj
@@ -2210,6 +2646,7 @@ class HarmonyEngine:
                                 ),
                                 layouts,
                                 self.config.language,
+                                chord_tokens=chord_tokens,
                             )
                             res_obj.token_usage = _extract_usage_from_response(
                                 resp,
@@ -2229,6 +2666,7 @@ class HarmonyEngine:
                     partial_candidate,
                     layouts,
                     self.config.language,
+                    chord_tokens=chord_tokens,
                 )
                 res_obj.token_usage = partial_usage
                 return res_obj

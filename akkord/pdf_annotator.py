@@ -212,29 +212,29 @@ def _measure_and_draw_chord_ref_badge(
     note_num: int,
     style: dict[str, str],
     base_font_size: float = 7.4,
-    pill_w: float = 26.5,
+    pill_w: float = 28.5,
     pill_h: float = 11.2,
     rect_x: float | None = None,
     rect_y: float | None = None,
 ) -> tuple[float, float]:
-    """Draw a uniform-sized badge containing the suggested chord and a smaller superscript ref number."""
-    ref_str = str(note_num)
+    """Draw a uniform-sized badge containing the chord and (when note_num > 0) a bracketed superscript ref number."""
+    ref_str = f"[{note_num}]" if note_num > 0 else ""
     chord_fs = base_font_size
-    sup_fs = round(chord_fs * 0.56, 2)
-    min_pad_x = 1.8
-    gap_x = 0.9
+    sup_fs = round(chord_fs * 0.54, 2)
+    min_pad_x = 1.6
+    gap_x = 1.0 if ref_str else 0.0
     max_content_w = pill_w - 2 * min_pad_x
 
     while chord_fs > 5.0:
         cw = c.stringWidth(chord_label, font_bold, chord_fs)
-        sw = c.stringWidth(ref_str, font_bold, sup_fs)
+        sw = c.stringWidth(ref_str, font_bold, sup_fs) if ref_str else 0.0
         if (cw + gap_x + sw) <= max_content_w:
             break
         chord_fs = round(chord_fs - 0.3, 2)
-        sup_fs = round(chord_fs * 0.56, 2)
+        sup_fs = round(chord_fs * 0.54, 2)
 
     cw = c.stringWidth(chord_label, font_bold, chord_fs)
-    sw = c.stringWidth(ref_str, font_bold, sup_fs)
+    sw = c.stringWidth(ref_str, font_bold, sup_fs) if ref_str else 0.0
     content_w = cw + gap_x + sw
 
     if rect_x is not None and rect_y is not None:
@@ -245,16 +245,34 @@ def _measure_and_draw_chord_ref_badge(
 
         start_x = rect_x + max(min_pad_x, (pill_w - content_w) / 2.0)
         base_y = rect_y + (pill_h - chord_fs) * 0.42 + 0.6
-        sup_y = base_y + chord_fs * 0.42
+        sup_y = base_y + chord_fs * 0.38
 
         c.setFillColor(HexColor(style["text"]))
         c.setFont(font_bold, chord_fs)
         c.drawString(start_x, base_y, chord_label)
 
-        c.setFont(font_bold, sup_fs)
-        c.drawString(start_x + cw + gap_x, sup_y, ref_str)
+        if ref_str:
+            c.setFont(font_bold, sup_fs)
+            c.drawString(start_x + cw + gap_x, sup_y, ref_str)
 
     return pill_w, pill_h
+
+
+def _measure_barline_bounds_for_x(
+    page_layout: PageLayout, sys_idx: int, x_pt: float
+) -> tuple[float | None, float | None]:
+    """Return (b_left, b_right) of the measure containing x_pt on system sys_idx, if barlines exist."""
+    if not page_layout.systems:
+        return None, None
+    idx0 = min(len(page_layout.systems) - 1, max(0, sys_idx - 1))
+    bars = page_layout.systems[idx0].barlines_x_pt
+    if len(bars) < 2:
+        return None, None
+    for m_i in range(len(bars) - 1):
+        b_l, b_r = bars[m_i], bars[m_i + 1]
+        if (b_l - 4.0) <= x_pt < (b_r - 3.0):
+            return b_l, b_r
+    return None, None
 
 
 def _draw_minimal_footnote_markers(
@@ -262,16 +280,17 @@ def _draw_minimal_footnote_markers(
     page_layout: PageLayout,
     numbered_page_anns: list[tuple[int, ChordAnnotation]],
 ) -> None:
-    """Draw uniform-sized badges showing the suggested chord + smaller superscript reference number on a score."""
+    """Draw uniform-sized badges showing confirmed chords and suggested chords + bracketed reference numbers."""
     _, font_bold, _, _ = _ensure_fonts()
     by_system: dict[int, list[tuple[int, ChordAnnotation]]] = {}
     for note_num, ann in numbered_page_anns:
         by_system.setdefault(ann.system_index, []).append((note_num, ann))
 
-    base_font_size = 7.2 if len(page_layout.systems) >= 6 else 7.6
-    uniform_pill_w = 26.0 if len(page_layout.systems) >= 6 else 27.5
+    base_font_size = 7.2 if len(page_layout.systems) >= 6 else 7.5
+    uniform_pill_w = 27.0 if len(page_layout.systems) >= 6 else 29.0
     uniform_pill_h = 10.8 if len(page_layout.systems) >= 6 else 11.4
-    pad_x = 2.4
+    correct_pill_w = 20.0 if len(page_layout.systems) >= 6 else 21.5
+    pad_x = 1.8
     pad_y = 1.5
     placed_rects: list[tuple[float, float, float, float]] = []
 
@@ -287,9 +306,17 @@ def _draw_minimal_footnote_markers(
 
         for note_num, ann in sys_items:
             chord_label = _get_suggested_chord_for_badge(ann)
-            style_key = "missing" if ann.status == "missing" else "improve"
+            if ann.status == "correct" or note_num <= 0:
+                style_key = "correct"
+                pill_w = correct_pill_w
+            elif ann.status == "missing":
+                style_key = "missing"
+                pill_w = uniform_pill_w
+            else:
+                style_key = "improve"
+                pill_w = uniform_pill_w
             style = PILL_STYLES[style_key]
-            pill_w, pill_h = uniform_pill_w, uniform_pill_h
+            pill_h = uniform_pill_h
 
             raw_x = float(ann.x_pt)
             if rescale_x:
@@ -299,19 +326,18 @@ def _draw_minimal_footnote_markers(
 
             y = _resolve_system_y(page_layout, ann, has_existing_chords=True)
 
-            # Place improvement badge immediately to the right of the printed chord symbol
-            # only when the printed chord is actually located at this top-of-staff Y band.
-            if (
-                ann.status == "improve"
-                and page_layout.ink_density_in_rect(raw_x, y - pad_y, 14.0, pill_h, pad_pt=0.5)
-                > 0.08
-            ):
-                raw_x += 16.0
+            b_left, b_right = _measure_barline_bounds_for_x(page_layout, sys_idx, raw_x)
+            measure_min_x = (b_left + 1.5) if b_left is not None else 32.0
+            measure_max_x = (
+                max(measure_min_x + pill_w + 1.0, b_right - 1.5)
+                if b_right is not None
+                else (page_layout.width_pt - 14.0)
+            )
 
-            x = max(36.0, min(page_layout.width_pt - pill_w - 20.0, raw_x))
+            x = max(measure_min_x + pad_x, min(page_layout.width_pt - pill_w - 20.0, raw_x))
 
-            if x < last_right_edge + 3.0:
-                x = min(page_layout.width_pt - pill_w - 18.0, last_right_edge + 3.0)
+            if x - pad_x < last_right_edge + 2.5:
+                x = min(page_layout.width_pt - pill_w - 18.0, last_right_edge + 2.5 + pad_x)
 
             y_min, y_max = _system_vertical_bounds(page_layout, sys_idx, pill_h)
             rect_x, rect_y = page_layout.find_clear_rect(
@@ -319,8 +345,8 @@ def _draw_minimal_footnote_markers(
                 y_pt=y - pad_y,
                 w_pt=pill_w,
                 h_pt=pill_h,
-                x_min_pt=max(32.0, last_right_edge + 2.5, x - pad_x - 10.0),
-                x_max_pt=min(page_layout.width_pt - 14.0, x - pad_x + pill_w + 12.0),
+                x_min_pt=max(32.0, measure_min_x, last_right_edge + 2.0, x - pad_x - 6.0),
+                x_max_pt=min(page_layout.width_pt - 14.0, measure_max_x, x - pad_x + pill_w + 10.0),
                 y_min_pt=y_min,
                 y_max_pt=y_max,
                 placed_rects=placed_rects,
@@ -495,14 +521,15 @@ def _draw_chord_pills(
 
             y = _resolve_system_y(page_layout, ann, has_existing_chords)
 
-            if (
-                ann.status == "improve"
-                and page_layout.ink_density_in_rect(raw_x, y - pad_y, 14.0, pill_h, pad_pt=0.5)
-                > 0.08
-            ):
-                raw_x += 16.0
+            b_left, b_right = _measure_barline_bounds_for_x(page_layout, sys_idx, raw_x)
+            measure_min_x = (b_left + 1.5) if b_left is not None else 32.0
+            measure_max_x = (
+                max(measure_min_x + pill_w + 1.0, b_right - 1.5)
+                if b_right is not None
+                else (page_layout.width_pt - 14.0)
+            )
 
-            x = max(36.0, min(page_layout.width_pt - pill_w - 20.0, raw_x))
+            x = max(measure_min_x + pad_x, min(page_layout.width_pt - pill_w - 20.0, raw_x))
 
             # Enforce left-to-right monotonic ordering on the system
             if x - pad_x < last_right_edge + 3.0:
@@ -517,8 +544,8 @@ def _draw_chord_pills(
                 y_pt=y - pad_y,
                 w_pt=pill_w,
                 h_pt=pill_h,
-                x_min_pt=max(32.0, last_right_edge + 2.5, x - pad_x - 10.0),
-                x_max_pt=min(page_layout.width_pt - 14.0, x - pad_x + pill_w + 12.0),
+                x_min_pt=max(32.0, measure_min_x, last_right_edge + 2.5, x - pad_x - 6.0),
+                x_max_pt=min(page_layout.width_pt - 14.0, measure_max_x, x - pad_x + pill_w + 10.0),
                 y_min_pt=y_min,
                 y_max_pt=y_max,
                 placed_rects=placed_rects,
@@ -1308,6 +1335,10 @@ def annotate_music_sheet_pdf(
             layout = layouts[idx]
             page_numbered = [
                 (num, ann) for num, ann in numbered_notes if ann.page_num == page_num
+            ] + [
+                (0, ann)
+                for ann in result.annotations
+                if ann.page_num == page_num and ann.status == "correct"
             ]
 
             packet = io.BytesIO()
